@@ -558,9 +558,7 @@ class Command:
         """
         Handles mouse clicks to toggle between 'Viewing' and 'Editing'.
         Logic:
-        1. If Editing -> Check if clicking on another valid ID
-           - Yes: Switch directly to new ID without showing colors
-           - No: Finish editing and show colors
+        1. If Editing -> Finish current edit (Loop back to Selection).
         2. If Selection -> Check if click is on valid ID.
            - Yes: Start Editing (Add carets, borders).
            - No: Do nothing (Do not exit).
@@ -573,6 +571,13 @@ class Command:
         session = self.get_session(ed_self)
         if not session.selected and not session.editing:
             return
+        
+        # This finish_editing() is necessary for edge cases:
+        # - When the event sequence is unpredictable, currently cudatext in my tests always send on_caret event before on_click event so finish_editing runs in on_caret so we do not need it here, but if cudatext change the events orders we will need finish_editing here
+        # - When clicking on empty space while editing if on_click event come before on_caret (should not happen)
+        # on_caret handles ID-to-ID transitions smoothly, but this ensures we always reach a clean state before starting new editing
+        if session.editing:
+            self.finish_editing(ed_self)
             
         carets = ed_self.get_carets()
         if not carets:
@@ -591,58 +596,8 @@ class Command:
                 and caret[0] >= key_tuple[0][0]:
                     clicked_key = key
                     offset = caret[0] - key_tuple[0][0]
-                    break
-            if clicked_key:
-                break
-        
-        # Handle different scenarios
-        if session.editing:
-            # We were editing something
-            if clicked_key and clicked_key in session.dictionary:
-                # Clicked on a valid ID - switch directly without showing colors
-                # First, ensure current edit is saved
-                if self.caret_in_current_token(ed_self):
-                    self.redraw(ed_self)
-                
-                # Clear current markers
-                ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
-                
-                # Set up new editing session
-                session.our_key = clicked_key
-                session.offset = offset
-                session.original = (caret[0], caret[1])
-                
-                # Add active carets and borders for new ID
-                for key_tuple in session.dictionary[session.our_key]:
-                    ed_self.attr(MARKERS_ADD, tag = MARKER_CODE, \
-                    x = key_tuple[0][0], y = key_tuple[0][1], \
-                    len = key_tuple[1][0] - key_tuple[0][0], \
-                    color_font=MARKER_F_COLOR, \
-                    color_bg=MARKER_BG_COLOR, \
-                    color_border=MARKER_BORDER_COLOR, \
-                    border_left=1, \
-                    border_right=1, \
-                    border_down=1, \
-                    border_up=1 \
-                    )
-                    ed_self.set_caret(key_tuple[0][0] + session.offset, key_tuple[0][1], id=CARET_ADD)
-                
-                # Update state - stay in editing mode
-                session.editing = True
-                session.selected = False
-                
-                # Track bounds
-                first_caret = ed_self.get_carets()[0]
-                session.start = first_caret[1]
-                session.end = first_caret[3]
-                if session.start > session.end and not session.end == -1:
-                    session.start, session.end = session.end, session.start
-            else:
-                # Clicked on empty space or non-duplicate word - finish editing and show colors
-                self.finish_editing(ed_self)
-                msg_status(_('Sync Editing: Not a word! Click on ID to edit it.'))
-            return
-        
+                    
+        # If click was NOT on a valid word
         # Not editing - in selection mode
         if not clicked_key:
             msg_status(_('Sync Editing: Not a word! Click on ID to edit it.'))
@@ -731,8 +686,9 @@ class Command:
         """
         Hooks into caret movement.
         Continuous Edit Logic:
-        If the user moves the caret OUTSIDE the active word, we do NOT exit.
-        We simply 'finish' the edit and return to Selection mode.
+        If the user moves the caret OUTSIDE the active word, we do NOT exit, we check if landing on another valid ID.
+        - If landing on valid ID: Do nothing (let on_click handle the switch)
+        - If landing elsewhere: We simply 'finish' the edit and return to Selection mode and show colors
         
         Also handles showing/hiding gutter icon based on selection.
         """
@@ -750,7 +706,31 @@ class Command:
         
         if session.editing:
             if not self.caret_in_current_token(ed_self):
-                self.finish_editing(ed_self)
+                # Caret left current token - check if it's on another valid ID
+                carets = ed_self.get_carets()
+                if carets:
+                    caret = carets[0]
+                    clicked_key = None
+                    
+                    # Check if caret is on a valid ID
+                    for key in session.dictionary:
+                        for key_tuple in session.dictionary[key]:
+                            if  caret[1] >= key_tuple[0][1] \
+                            and caret[1] <= key_tuple[1][1] \
+                            and caret[0] <= key_tuple[1][0] \
+                            and caret[0] >= key_tuple[0][0]:
+                                clicked_key = key
+                                break
+                        if clicked_key:
+                            break
+                    
+                    # If NOT on a valid ID, finish editing and show colors
+                    if not clicked_key:
+                        self.finish_editing(ed_self)
+                    # If on a valid ID, do nothing - let on_click handle the transition
+                    # Clicked on a valid ID - switch directly without showing colors, this prevent showing colors for an instant when i switch from an ID to another ID
+                else:
+                    self.finish_editing(ed_self)
                 return
             self.redraw(ed_self)
 
@@ -804,7 +784,7 @@ class Command:
         # Workaround for end of id case
         if not session.pattern.match(first_y_line[start_pos:]):
             start_pos -= 1
-        while start_pos > 0 and session.pattern.match(first_y_line[start_pos:]):
+        while session.pattern.match(first_y_line[start_pos:]):
             start_pos -= 1
         start_pos += 1
         # Workaround for EOL #65
@@ -845,7 +825,7 @@ class Command:
             y = pointer[1]
             y_line = ed_self.get_text_line(y)
             # Scan backwards to find start of the new word instance
-            while x > 0 and session.pattern.match(y_line[x:]):
+            while session.pattern.match(y_line[x:]):
                 x -= 1
             x += 1
             # Workaround for EOL #65
