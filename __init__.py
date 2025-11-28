@@ -27,23 +27,30 @@ _ = get_translation(__file__)  # I18N
 #      -> If user moves caret off-word: Edit commits, returns to [Selection State].
 # 5. Exit: Clicking the gutter icon again or pressing 'ESC' fully terminates the session.
 
-# Generate a unique integer tag for this plugin's markers to avoid conflicts with other plugins
-# Uniq value for all marker plugins
-MARKER_CODE = app_proc(PROC_GET_UNIQUE_TAG, '') 
-DECOR_TAG = app_proc(PROC_GET_UNIQUE_TAG, '')  # Unique tag for gutter decorations
 
 # --- Default Configuration ---
-CASE_SENSITIVE = True
+USE_COLORS_DEFAULT = True
+USE_SIMPLE_NAIVE_MODE_DEFAULT = False
+CASE_SENSITIVE_DEFAULT = True
 FIND_REGEX_DEFAULT = r'\w+'
 # FIND_REGEX_DEFAULT = r'\b\w+\b'
-
-FIND_REGEX = FIND_REGEX_DEFAULT
-
 # Regex to identify valid tokens (identifiers) vs invalid ones
 STYLES_DEFAULT = r'(?i)id[\w\s]*'       # Styles that are considered "Identifiers"
 STYLES_NO_DEFAULT = '(?i).*keyword.*'   # Styles that are strictly keywords (should not be edited)
+
+USE_COLORS = USE_COLORS_DEFAULT
+USE_SIMPLE_NAIVE_MODE = USE_SIMPLE_NAIVE_MODE_DEFAULT
+CASE_SENSITIVE = CASE_SENSITIVE_DEFAULT
+FIND_REGEX = FIND_REGEX_DEFAULT
 STYLES = STYLES_DEFAULT
 STYLES_NO = STYLES_NO_DEFAULT
+
+# Visual settings for the markers
+MARKER_BG_COLOR = 0xFFAAAA
+MARKER_F_COLOR  = 0x005555
+MARKER_BORDER_COLOR = 0xFF0000
+
+CONFIG_FILENAME = 'cuda_sync_editing.ini'
 
 # Overrides for specific lexers that have unique naming conventions
 NON_STANDART_LEXERS = {
@@ -61,21 +68,12 @@ NAIVE_LEXERS = [
   'JSON',
 ]
 
-# Visual settings for the markers
-MARKER_BG_COLOR = 0xFFAAAA
-MARKER_F_COLOR  = 0x005555
-MARKER_BORDER_COLOR = 0xFF0000
-MARK_COLORS = True
-ASK_TO_EXIT = True
-
-CONFIG_FILENAME = 'cuda_sync_editing.ini'
-CONFIG_SECTION_GLOBAL = 'global'
-CONFIG_SECTION_PREFIX_LEXER = 'lexer_'
+MARKER_CODE = app_proc(PROC_GET_UNIQUE_TAG, '') # Generate a unique integer tag for this plugin's markers to avoid conflicts with other plugins
+DECOR_TAG = app_proc(PROC_GET_UNIQUE_TAG, '')  # Unique tag for gutter decorations
 
 
 def bool_to_ini(value):
     return 'true' if value else 'false'
-
 
 def ini_to_bool(value, default):
     if value is None:
@@ -88,17 +86,14 @@ def ini_to_bool(value, default):
             return False
     return default
 
-
 GLOBAL_DEFAULTS = {
-    'syncedit_ask_to_exit': bool_to_ini(ASK_TO_EXIT),
-    'syncedit_mark_words': bool_to_ini(MARK_COLORS),
-    'syncedit_naive_mode': bool_to_ini(False),
-    'case_sens': bool_to_ini(True),
+    'use_colors': bool_to_ini(USE_COLORS_DEFAULT),
+    'use_simple_naive_mode': bool_to_ini(USE_SIMPLE_NAIVE_MODE_DEFAULT),
+    'case_sensitive': bool_to_ini(CASE_SENSITIVE_DEFAULT),
     'id_regex': FIND_REGEX_DEFAULT,
     'id_styles': STYLES_DEFAULT,
     'id_styles_no': STYLES_NO_DEFAULT,
 }
-
 
 class PluginConfig:
     """Handles reading and ensuring defaults for plugin configuration stored in an INI file."""
@@ -112,17 +107,10 @@ class PluginConfig:
 
     def ensure_file(self):
         """Creates the config file if missing and populates default keys."""
+        # Add missing keys in [global] (do not overwrite existing values)
         for key, value in GLOBAL_DEFAULTS.items():
-            if self._read_raw(CONFIG_SECTION_GLOBAL, key) is None:
-                ini_write(self.file_path, CONFIG_SECTION_GLOBAL, key, value)
-
-    def get_global_bool(self, key, default):
-        raw = self._read_raw(CONFIG_SECTION_GLOBAL, key)
-        return ini_to_bool(raw, default)
-
-    def get_global_str(self, key, default):
-        raw = self._read_raw(CONFIG_SECTION_GLOBAL, key)
-        return default if raw is None else raw
+            if self._read_raw('global', key) is None:
+                ini_write(self.file_path, 'global', key, value)
 
     def get_lexer_bool(self, lexer, key, default):
         raw = self._get_lexer_value(lexer, key)
@@ -133,33 +121,33 @@ class PluginConfig:
         return default if raw is None else raw
 
     def _get_lexer_value(self, lexer, key):
+        """
+        Return the raw string value:
+          1) If the value exists in the per-lexer section, return it
+          2) Else return value from [global] if present
+          3) Else return None
+        """
         raw = None
         if lexer:
-            raw = self._read_raw(self._lexer_section(lexer), key)
+            # Try to read [lexer_Name]
+            section = f'lexer_{lexer}'
+            raw = self._read_raw(section, key)
         if raw is None:
-            raw = self._read_raw(CONFIG_SECTION_GLOBAL, key)
+            # Fallback to [global]
+            raw = self._read_raw('global', key)
         return raw
 
     def _read_raw(self, section, key):
         result = ini_read(self.file_path, section, key, self._SENTINEL)
         return None if result == self._SENTINEL else result
 
-    @staticmethod
-    def _lexer_section(lexer):
-        return f'{CONFIG_SECTION_PREFIX_LEXER}{lexer}'
-
-
-plugin_config = PluginConfig()
-
-# Load current IDE theme colors
-theme = app_proc(PROC_THEME_SYNTAX_DICT_GET, '')
-
 def theme_color(name, is_font):
-    """Retrieves color from the current CudaText theme."""
+    """Retrieves color from the current CudaText theme by fetching the dictionary fresh."""
+    # Load current IDE theme colors
+    theme = app_proc(PROC_THEME_SYNTAX_DICT_GET, '')
     if name in theme:
         return theme[name]['color_font' if is_font else 'color_back']
     return 0x808080
-
 
 class SyncEditSession:
     """
@@ -194,34 +182,15 @@ class Command:
     NOW SUPPORTS MULTIPLE FILES - one session per file.
     OPTIMIZED: Does nothing when not in use to save resources.
     """
-    
-    def __init__(self):
-        """Initializes plugin, loads theme colors and user options."""
-        global MARKER_F_COLOR
-        global MARKER_BG_COLOR
-        global MARKER_BORDER_COLOR
-        global MARK_COLORS
-        global ASK_TO_EXIT
-        
-        # Set colors based on theme 'Id' and 'SectionBG4' styles
-        MARKER_F_COLOR = theme_color('Id', True)
-        MARKER_BG_COLOR = theme_color('SectionBG4', False)
-        MARKER_BORDER_COLOR = MARKER_F_COLOR
-        
-        self.config = plugin_config
 
-        # Load user preferences from ini file
-        ASK_TO_EXIT = self.config.get_global_bool('syncedit_ask_to_exit', ASK_TO_EXIT)
-        MARK_COLORS = self.config.get_global_bool('syncedit_mark_words', MARK_COLORS)
-        
+    def __init__(self):
+        """Initializes plugin state."""
         # Dictionary to store sessions: {editor_handle: SyncEditSession}
         self.sessions = {}
-
 
     def get_editor_handle(self, ed_self):
         """Returns a unique identifier for the editor."""
         return ed_self.get_prop(PROP_HANDLE_SELF)
-
 
     def get_session(self, ed_self):
         """Gets or creates a session for the current editor."""
@@ -245,11 +214,9 @@ class Command:
         if handle in self.sessions:
             del self.sessions[handle]
 
-
     def is_sync_active(self, ed_self):
         """Check if sync edit is active using PROP_TAG (lightweight check)."""
         return ed_self.get_prop(PROP_TAG, 'cuda_sync_editing:undefined') == 'active'
-
 
     def show_gutter_icon(self, ed_self, line_index, active=False):
         """Shows the gutter icon at the specified line."""
@@ -265,8 +232,7 @@ class Command:
             session = self.get_session(ed_self)
             session.gutter_icon_line = line_index
             session.gutter_icon_active = True
-    
-    
+
     def hide_gutter_icon(self, ed_self):
         """Removes the gutter icon."""
         ed_self.decor(DECOR_DELETE_BY_TAG, -1, DECOR_TAG)
@@ -275,14 +241,12 @@ class Command:
             session.gutter_icon_line = None
             session.gutter_icon_active = False
 
-
     def token_style_ok(self, ed_self, s):
         """Checks if a token's style matches the allowed patterns (IDs) and rejects Keywords."""
         session = self.get_session(ed_self)
         good = session.pattern_styles.fullmatch(s)
         bad = session.pattern_styles_no.fullmatch(s)
         return good and not bad
-         
 
     def toggle(self, ed_self=None):
         """
@@ -299,8 +263,7 @@ class Command:
         
         # Otherwise, start sync editing
         self.start_sync_edit(ed_self)
-    
-    
+
     def start_sync_edit(self, ed_self):
         """
         Starts sync editing session.
@@ -308,17 +271,24 @@ class Command:
         2. Scans text (via Lexer or Regex).
         3. Groups identical words.
         4. Applies visual markers (colors).
+        
+        All configuration is read fresh from file/theme on every start so do not need to restart.
         """
         session = self.get_session(ed_self)
         # now that we created a session we should always call update_gutter_icon_on_selection before start_sync_edit to set gutter_icon_line (set by show_gutter_icon) which will be used in start_sync_edit to set the red/active gutter icon
         self.update_gutter_icon_on_selection(ed_self)
         
-        global FIND_REGEX
+        # --- Declare all globals that need fresh values ---
+        global USE_COLORS
         global CASE_SENSITIVE
-        global STYLES_DEFAULT
-        global STYLES_NO_DEFAULT
+        global FIND_REGEX
         global STYLES
+        global STYLES_DEFAULT
         global STYLES_NO
+        global STYLES_NO_DEFAULT
+        global MARKER_F_COLOR
+        global MARKER_BG_COLOR
+        global MARKER_BORDER_COLOR
         
         carets = ed_self.get_carets()
         if len(carets)!=1:
@@ -378,15 +348,25 @@ class Command:
             # If lexer is none, go very naive way
             session.naive_mode = True
         
-        config = self.config
+        # Instantiate config to get fresh values from disk on every session
+        ini_config = PluginConfig()
+        USE_SIMPLE_NAIVE_MODE = ini_config.get_lexer_bool(cur_lexer, 'use_simple_naive_mode', USE_SIMPLE_NAIVE_MODE_DEFAULT)
 
-        if cur_lexer in NAIVE_LEXERS or config.get_lexer_bool(cur_lexer, 'syncedit_naive_mode', False):
+        if cur_lexer in NAIVE_LEXERS or USE_SIMPLE_NAIVE_MODE:
             session.naive_mode = True
-        # Load lexer config
-        CASE_SENSITIVE = config.get_lexer_bool(cur_lexer, 'case_sens', True)
-        FIND_REGEX = config.get_lexer_str(cur_lexer, 'id_regex', FIND_REGEX_DEFAULT)
-        STYLES = config.get_lexer_str(cur_lexer, 'id_styles', STYLES_DEFAULT)
-        STYLES_NO = config.get_lexer_str(cur_lexer, 'id_styles_no', STYLES_NO_DEFAULT)
+        
+        # Load Lexer/Global Configs
+        USE_COLORS = ini_config.get_lexer_bool(cur_lexer, 'use_colors', USE_COLORS_DEFAULT)
+        CASE_SENSITIVE = ini_config.get_lexer_bool(cur_lexer, 'case_sensitive', CASE_SENSITIVE_DEFAULT)
+        FIND_REGEX = ini_config.get_lexer_str(cur_lexer, 'id_regex', FIND_REGEX_DEFAULT)
+        STYLES = ini_config.get_lexer_str(cur_lexer, 'id_styles', STYLES_DEFAULT)
+        STYLES_NO = ini_config.get_lexer_str(cur_lexer, 'id_styles_no', STYLES_NO_DEFAULT)
+
+        # Set colors based on theme 'Id' and 'SectionBG4' styles
+        MARKER_F_COLOR = theme_color('Id', True)
+        MARKER_BG_COLOR = theme_color('SectionBG4', False)
+        MARKER_BORDER_COLOR = MARKER_F_COLOR
+        
         # Compile regex
         session.pattern = re.compile(FIND_REGEX)
         session.pattern_styles = re.compile(STYLES)
@@ -481,8 +461,7 @@ class Command:
         msg_status(_('Sync Editing: Click an ID to edit, click gutter icon or press Esc to exit.'))
         # restore caret but w/o selection
         restore_caret()
-        
-        
+
     # Fix tokens with spaces at the start of the line (eg: ((0, 50), (16, 50), '        original', 'Id')) and remove if it has 1 occurence (issue #44 and #45)
     def fix_tokens(self, ed_self):
         """
@@ -525,14 +504,12 @@ class Command:
         # Remove entries that don't have duplicates
         for dell in todelete:
             session.dictionary.pop(dell, None)
-    
-    
+
     # Set progress (issue #46)
     def set_progress(self, prg):
         """Updates the CudaText status bar progress."""
         app_proc(PROC_PROGRESSBAR, prg)
         app_idle()
-
 
     def mark_all_words(self, ed_self):
         """
@@ -540,7 +517,7 @@ class Command:
         Used during initialization and when returning to selection mode after an edit.
         """
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
-        if not MARK_COLORS:
+        if not USE_COLORS:
             return
         rand_color = randomcolor.RandomColor()
         session = self.get_session(ed_self)
@@ -558,7 +535,6 @@ class Command:
                     color_border = 0xb000000,
                     border_down = 1
                     )
-
 
     def finish_editing(self, ed_self):
         """
@@ -585,7 +561,6 @@ class Command:
         
         # Re-paint markers so user can see what else to edit
         self.mark_all_words(ed_self)
-
 
     def caret_in_current_token(self, ed_self):
         """
@@ -620,7 +595,6 @@ class Command:
                 return True
         return False
 
-
     def reset(self, ed_self=None):
         """
         FULLY Exits the plugin.
@@ -649,7 +623,6 @@ class Command:
         
         msg_status(_('Sync Editing: Cancelled'))
 
-
     def doclick(self, ed_self=None):
         """API Hook for Mouse Click events."""
         if ed_self is None:
@@ -657,7 +630,6 @@ class Command:
         # state = app_proc(PROC_GET_KEYSTATE, '')
         state = ''
         return self.on_click(ed_self, state)
-
 
     def on_click(self, ed_self, state):
         """
@@ -741,7 +713,6 @@ class Command:
         if session.start > session.end and not session.end == -1:
             session.start, session.end = session.end, session.start
 
-
     def on_click_gutter(self, ed_self, state, nline, nband):
         """
         Handles clicks on the gutter area.
@@ -785,7 +756,7 @@ class Command:
                     self.hide_gutter_icon(ed_self)
             else:
                 self.hide_gutter_icon(ed_self)
-                    
+
     def on_caret(self, ed_self):
     # on_caret_slow is better because it will consume less resources but it breaks the colors recalculations when user edit an ID, so stick with on_caret
         """
@@ -839,7 +810,6 @@ class Command:
                 return
             self.redraw(ed_self)
 
-
     def on_key(self, ed_self, key, state):
         """
         Handles Esc Keyboard input to cancel sync editing.
@@ -855,10 +825,8 @@ class Command:
             self.reset(ed_self)
             return False
 
-
     def on_start2(self, ed_self):
         pass
-
 
     # Redraws Id's borders
     def redraw(self, ed_self):
@@ -1002,10 +970,10 @@ class Command:
                 border_up=1 \
                 )
 
-
     def config(self):
         """Opens the plugin configuration INI file."""
         try:
-            file_open(self.config.file_path)
+            ini_config = PluginConfig()
+            file_open(ini_config.file_path)
         except Exception as ex:
             msg_status(_('Cannot open config: ') + str(ex))
