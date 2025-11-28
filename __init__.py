@@ -783,11 +783,13 @@ class Command:
         Because editing changes the length of the word, we must:
         1. Find the new word at the caret.
         2. Re-scan the document (dictionary) for that specific word.
-        3. Re-draw the borders.
+        3. Update positions of ALL words that come after the edit on the same line.
+        4. Re-draw all the borders.
         """
         session = self.get_session(ed_self)
         if not session.our_key:
             return
+        
         # Find out what changed on the first caret (on others changes will be the same)
         old_key = session.our_key
         session.our_key = None
@@ -802,7 +804,7 @@ class Command:
         # Workaround for end of id case
         if not session.pattern.match(first_y_line[start_pos:]):
             start_pos -= 1
-        while session.pattern.match(first_y_line[start_pos:]):
+        while start_pos > 0 and session.pattern.match(first_y_line[start_pos:]):
             start_pos -= 1
         start_pos += 1
         # Workaround for EOL #65
@@ -819,21 +821,31 @@ class Command:
         new_key = session.pattern.match(first_y_line[start_pos:]).group(0)
         if not CASE_SENSITIVE:
             new_key = new_key.lower()
-            
-        # Rebuild dictionary positions for the modified word with new values
+        
+        # Calculate the length change
+        old_length = len(old_key)
+        new_length = len(new_key)
+        length_delta = new_length - old_length
+        
+        # Get the list of affected lines (lines where we edited)
+        affected_lines = set()
         old_key_dictionary = session.dictionary[old_key]
+        for entry in old_key_dictionary:
+            affected_lines.add(entry[0][1])  # y coordinate
+        
+        # Rebuild dictionary positions for the modified word with new values
         existing_entries = session.dictionary.get(new_key, [])
         pointers = []
         for i in old_key_dictionary:
             pointers.append(i[0])
             
-        # Recalculate positions for all instances
+        # Recalculate positions for all instances of the edited word
         for pointer in pointers:
             x = pointer[0]
             y = pointer[1]
             y_line = ed_self.get_text_line(y)
             # Scan backwards to find start of the new word instance
-            while session.pattern.match(y_line[x:]):
+            while x > 0 and session.pattern.match(y_line[x:]):
                 x -= 1
             x += 1
             # Workaround for EOL #65
@@ -842,15 +854,56 @@ class Command:
             existing_entries = [item for item in existing_entries if item[0] != (x, y)]
             existing_entries.append(((x, y), (x+len(new_key), y), new_key, 'Id'))
         
-        # Update dictionary keys
+        # Update dictionary keys for the edited word
         if old_key != new_key:
             session.dictionary.pop(old_key, None)
         session.dictionary[new_key] = existing_entries
-        # End rebuilding dictionary
+        
+        # Update positions of ALL other words on affected lines
+        if length_delta != 0:
+            for line_num in affected_lines:
+                # For each edited position on this line, shift words that come after it
+                edited_positions = [pos[0][0] for pos in existing_entries if pos[0][1] == line_num]
+                
+                for other_key in list(session.dictionary.keys()):
+                    if other_key == new_key:
+                        continue  # Skip the word we just edited
+                    
+                    updated_entries = []
+                    for entry in session.dictionary[other_key]:
+                        if entry[0][1] == line_num:  # Same line
+                            word_start_x = entry[0][0]
+                            word_end_x = entry[1][0]
+                            
+                            # Check if this word comes after any of the edited positions
+                            shift_amount = 0
+                            for edit_x in sorted(edited_positions):
+                                if word_start_x > edit_x:
+                                    shift_amount += length_delta
+                            
+                            if shift_amount != 0:
+                                # Create new entry with shifted position
+                                new_entry = (
+                                    (word_start_x + shift_amount, entry[0][1]),
+                                    (word_end_x + shift_amount, entry[1][1]),
+                                    entry[2],
+                                    entry[3]
+                                )
+                                updated_entries.append(new_entry)
+                            else:
+                                updated_entries.append(entry)
+                        else:
+                            # Different line, keep as-is
+                            updated_entries.append(entry)
+                    
+                    session.dictionary[other_key] = updated_entries
+        
         session.our_key = new_key
         
-        # Repaint borders for the new word length
+        # Repaint borders for ALL words
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
+        
+        # Draw borders for the currently edited word
         for key_tuple in session.dictionary[session.our_key]:
                 ed_self.attr(MARKERS_ADD, tag = MARKER_CODE, \
                 x = key_tuple[0][0], y = key_tuple[0][1], \
