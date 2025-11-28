@@ -8,7 +8,7 @@ import os
 from . import randomcolor
 from cudatext import *
 from cudatext_keys import *
-from cudax_lib import html_color_to_int, get_opt, set_opt, CONFIG_LEV_USER, CONFIG_LEV_LEX
+from cudax_lib import html_color_to_int
 
 from cudax_lib import get_translation
 _ = get_translation(__file__)  # I18N
@@ -68,6 +68,89 @@ MARKER_BORDER_COLOR = 0xFF0000
 MARK_COLORS = True
 ASK_TO_EXIT = True
 
+CONFIG_FILENAME = 'cuda_sync_editing.ini'
+CONFIG_SECTION_GLOBAL = 'global'
+CONFIG_SECTION_PREFIX_LEXER = 'lexer_'
+
+
+def bool_to_ini(value):
+    return 'true' if value else 'false'
+
+
+def ini_to_bool(value, default):
+    if value is None:
+        return default
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ('1', 'true', 'yes', 'on'):
+            return True
+        if normalized in ('0', 'false', 'no', 'off'):
+            return False
+    return default
+
+
+GLOBAL_DEFAULTS = {
+    'syncedit_ask_to_exit': bool_to_ini(ASK_TO_EXIT),
+    'syncedit_mark_words': bool_to_ini(MARK_COLORS),
+    'syncedit_naive_mode': bool_to_ini(False),
+    'case_sens': bool_to_ini(True),
+    'id_regex': FIND_REGEX_DEFAULT,
+    'id_styles': STYLES_DEFAULT,
+    'id_styles_no': STYLES_NO_DEFAULT,
+}
+
+
+class PluginConfig:
+    """Handles reading and ensuring defaults for plugin configuration stored in an INI file."""
+
+    _SENTINEL = '__cuda_sync_editing_missing__'
+
+    def __init__(self):
+        settings_dir = app_path(APP_DIR_SETTINGS)
+        self.file_path = os.path.join(settings_dir, CONFIG_FILENAME)
+        self.ensure_file()
+
+    def ensure_file(self):
+        """Creates the config file if missing and populates default keys."""
+        for key, value in GLOBAL_DEFAULTS.items():
+            if self._read_raw(CONFIG_SECTION_GLOBAL, key) is None:
+                ini_write(self.file_path, CONFIG_SECTION_GLOBAL, key, value)
+
+    def get_global_bool(self, key, default):
+        raw = self._read_raw(CONFIG_SECTION_GLOBAL, key)
+        return ini_to_bool(raw, default)
+
+    def get_global_str(self, key, default):
+        raw = self._read_raw(CONFIG_SECTION_GLOBAL, key)
+        return default if raw is None else raw
+
+    def get_lexer_bool(self, lexer, key, default):
+        raw = self._get_lexer_value(lexer, key)
+        return ini_to_bool(raw, default)
+
+    def get_lexer_str(self, lexer, key, default):
+        raw = self._get_lexer_value(lexer, key)
+        return default if raw is None else raw
+
+    def _get_lexer_value(self, lexer, key):
+        raw = None
+        if lexer:
+            raw = self._read_raw(self._lexer_section(lexer), key)
+        if raw is None:
+            raw = self._read_raw(CONFIG_SECTION_GLOBAL, key)
+        return raw
+
+    def _read_raw(self, section, key):
+        result = ini_read(self.file_path, section, key, self._SENTINEL)
+        return None if result == self._SENTINEL else result
+
+    @staticmethod
+    def _lexer_section(lexer):
+        return f'{CONFIG_SECTION_PREFIX_LEXER}{lexer}'
+
+
+plugin_config = PluginConfig()
+
 # Load current IDE theme colors
 theme = app_proc(PROC_THEME_SYNTAX_DICT_GET, '')
 
@@ -125,9 +208,11 @@ class Command:
         MARKER_BG_COLOR = theme_color('SectionBG4', False)
         MARKER_BORDER_COLOR = MARKER_F_COLOR
         
-        # Load user preferences from user.json
-        ASK_TO_EXIT = get_opt('syncedit_ask_to_exit', True, lev=CONFIG_LEV_USER)
-        MARK_COLORS = get_opt('syncedit_mark_words', True, lev=CONFIG_LEV_USER)
+        self.config = plugin_config
+
+        # Load user preferences from ini file
+        ASK_TO_EXIT = self.config.get_global_bool('syncedit_ask_to_exit', ASK_TO_EXIT)
+        MARK_COLORS = self.config.get_global_bool('syncedit_mark_words', MARK_COLORS)
         
         # Dictionary to store sessions: {editor_handle: SyncEditSession}
         self.sessions = {}
@@ -293,13 +378,15 @@ class Command:
             # If lexer is none, go very naive way
             session.naive_mode = True
         
-        if cur_lexer in NAIVE_LEXERS or get_opt('syncedit_naive_mode', False, lev=CONFIG_LEV_LEX):
+        config = self.config
+
+        if cur_lexer in NAIVE_LEXERS or config.get_lexer_bool(cur_lexer, 'syncedit_naive_mode', False):
             session.naive_mode = True
         # Load lexer config
-        CASE_SENSITIVE = get_opt('case_sens', True, lev=CONFIG_LEV_LEX)
-        FIND_REGEX = get_opt('id_regex', FIND_REGEX_DEFAULT, lev=CONFIG_LEV_LEX)
-        STYLES = get_opt('id_styles', STYLES_DEFAULT, lev=CONFIG_LEV_LEX)
-        STYLES_NO = get_opt('id_styles_no', STYLES_NO_DEFAULT, lev=CONFIG_LEV_LEX)
+        CASE_SENSITIVE = config.get_lexer_bool(cur_lexer, 'case_sens', True)
+        FIND_REGEX = config.get_lexer_str(cur_lexer, 'id_regex', FIND_REGEX_DEFAULT)
+        STYLES = config.get_lexer_str(cur_lexer, 'id_styles', STYLES_DEFAULT)
+        STYLES_NO = config.get_lexer_str(cur_lexer, 'id_styles_no', STYLES_NO_DEFAULT)
         # Compile regex
         session.pattern = re.compile(FIND_REGEX)
         session.pattern_styles = re.compile(STYLES)
@@ -917,12 +1004,8 @@ class Command:
 
 
     def config(self):
-        print("self.sessions", len(self.sessions),self.sessions) # TODO delete
-        """Opens the configuration/readme file."""
-        if msg_box(_('Open plugin\'s readme.txt to read about configuring?'), 
-                MB_OKCANCEL+MB_ICONQUESTION) == ID_OK:
-            fn = os.path.join(os.path.dirname(__file__), 'readme', 'readme.txt')
-            if os.path.isfile(fn):
-                file_open(fn)
-            else:
-                msg_status(_('Cannot find file: ')+fn)
+        """Opens the plugin configuration INI file."""
+        try:
+            file_open(self.config.file_path)
+        except Exception as ex:
+            msg_status(_('Cannot open config: ') + str(ex))
