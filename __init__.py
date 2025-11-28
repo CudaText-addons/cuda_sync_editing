@@ -17,14 +17,14 @@ _ = get_translation(__file__)  # I18N
 # This plugin enables Synchronous Editing (multi-cursor editing) within a specific selection.
 # 
 # WORKFLOW (Continuous Mode):
-# 1. Activation: User selects text and a gutter icon appears on the last line of selection
-# 2. User clicks the gutter icon to start sync editing
+# 1. Activation: User selects text and a gutter icon appears on the last line of selection.
+# 2. Start: User clicks the gutter icon or triggers the command to start sync editing.
 # 3. Analysis: The plugin scans for identifiers (variables, etc.) and highlights them with background colors.
-# 4. Interaction Loop (Circular State Machine):
+# 4. Interaction Loop:
 #    - [Selection State]: User sees highlighted words. Clicking a word triggers [Edit State].
-#    - [Edit State]: Multi-carets are placed. User types. 
-#      -> If user clicks another word: Previous edit commits, new edit starts immediately.
-#      -> If user moves caret off-word: Edit commits, returns to [Selection State].
+#    - [Edit State]: Multi-carets are placed on all instances of the clicked word. User types.
+#      -> If user clicks another highlighted word: Previous edit commits, new edit starts immediately on the new word.
+#      -> If user moves caret off-word: Edit commits, returns to [Selection State] (markers remain visible).
 # 5. Exit: Clicking the gutter icon again or pressing 'ESC' fully terminates the session.
 
 
@@ -34,6 +34,7 @@ USE_SIMPLE_NAIVE_MODE_DEFAULT = False
 CASE_SENSITIVE_DEFAULT = True
 IDENTIFIER_REGEX_DEFAULT = r'\w+'
 # IDENTIFIER_REGEX_DEFAULT = r'\b\w+\b'
+
 # Regex to identify valid tokens (identifiers) vs invalid ones
 IDENTIFIER_STYLE_INCLUDE_DEFAULT = r'(?i)id[\w\s]*'    # Styles that are considered "Identifiers"
 IDENTIFIER_STYLE_EXCLUDE_DEFAULT = '(?i).*keyword.*'   # Styles that are strictly keywords (should not be edited)
@@ -41,12 +42,13 @@ IDENTIFIER_STYLE_EXCLUDE_DEFAULT = '(?i).*keyword.*'   # Styles that are strictl
 CONFIG_FILENAME = 'cuda_sync_editing.ini'
 
 # Overrides for specific lexers that have unique naming conventions
-NON_STANDART_LEXERS = {
+NON_STANDARD_LEXERS = {
   'HTML': 'Text|Tag id correct|Tag prop',
   'PHP': 'Var',
 }
   
 # Lexers where we skip syntax parsing and just use Regex (Naive mode)
+# This is useful for plain text formats or where CudaText lexers don't output specific 'Id' styles.
 NAIVE_LEXERS = [
   'Markdown', # it has 'Text' rule for many chars, including punctuation+spaces
   'reStructuredText',
@@ -54,6 +56,7 @@ NAIVE_LEXERS = [
   'ToDo',
   'Todo.txt',
   'JSON',
+  'Ini files',
 ]
 
 MARKER_CODE = app_proc(PROC_GET_UNIQUE_TAG, '') # Generate a unique integer tag for this plugin's markers to avoid conflicts with other plugins
@@ -111,9 +114,9 @@ class PluginConfig:
     def _get_lexer_value(self, lexer, key):
         """
         Return the raw string value:
-          1) If the value exists in the per-lexer section, return it
-          2) Else return value from [global] if present
-          3) Else return None
+          1) If the value exists in the per-lexer section [lexer_Name], return it.
+          2) Else return value from [global] if present.
+          3) Else return None.
         """
         raw = None
         if lexer:
@@ -139,19 +142,20 @@ def theme_color(name, is_font):
 
 class SyncEditSession:
     """
-    Represents a single sync edit session for one file.
-    Each file can have only one active session.
+    Represents a single sync edit session for one file (tab).
+    Each editor handle has its own instance of this class to maintain state isolation.
     """
     def __init__(self):
         self.selected = False 
         self.editing = False
-        self.dictionary = {} # Stores mapping of { "word_string": [list_of_token_positions] }
+        self.dictionary = {} # Stores mapping of { "word_string": [list_of_token_tuples_positions] }
+                             # Token tuple format: ((x1, y1), (x2, y2), string, style)
         self.our_key = None  # The specific word currently being edited
         self.original = None # Original caret position before editing
         self.start_l = None  # Start line of selection
         self.end_l = None    # End line of selection
         self.gutter_icon_line = None     # Line where gutter icon is displayed
-        self.gutter_icon_active = False  # Whether gutter icon is currently shown
+        self.gutter_icon_active = False  # Whether gutter icon is currently shown/red
 
         # Config ini
         self.use_colors = USE_COLORS_DEFAULT
@@ -177,8 +181,8 @@ class Command:
     Main Logic for Sync Editing.
     Manages the Circular State Machine: Selection <-> Editing.
     Can be toggled via gutter icon or command.
-    NOW SUPPORTS MULTIPLE FILES - one session per file.
-    OPTIMIZED: Does nothing when not in use to save resources.
+    Supports Multiple Files - one session per file.
+    OPTIMIZED: plugin does minimal checks possible when not in use to save resources.
     """
 
     def __init__(self):
@@ -194,7 +198,7 @@ class Command:
         """Gets or creates a session for the current editor."""
         handle = self.get_editor_handle(ed_self)
         if handle not in self.sessions:
-            print("============creates a session:",handle)
+            # print("============creates a session:",handle) # DEBUG
             self.sessions[handle] = SyncEditSession()
         return self.sessions[handle]
     
@@ -207,18 +211,20 @@ class Command:
         return handle in self.sessions
     
     def remove_session(self, ed_self):
-        """Removes the session for the current editor."""
+        """Removes the session for the current editor (cleanup)."""
         handle = self.get_editor_handle(ed_self)
         if handle in self.sessions:
             del self.sessions[handle]
 
     def show_gutter_icon(self, ed_self, line_index, active=False):
         """Shows the gutter icon at the specified line."""
-        # Remove any existing gutter icon
+        # Remove any existing gutter icon first
         self.hide_gutter_icon(ed_self)
         
         # Choose color based on active state
-        color = 0x0000AA if active else 0x00AA00  # Red when active, green when inactive
+        # 0x00AA00 (Green) = Available / Selection Mode
+        # 0x0000AA (Red)   = Active / Editing Mode
+        color = 0x0000AA if active else 0x00AA00
         
         ed_self.decor(DECOR_SET, line=line_index, tag=DECOR_TAG, text="≡", color=color, bold=True, italic=False, image=-1, auto_del=False)
         
@@ -237,7 +243,8 @@ class Command:
 
     def update_gutter_icon_on_selection(self, ed_self):
         """
-        Called when selection changes. Shows gutter icon if there's a valid selection.
+        Called when selection changes (via on_caret). 
+        Shows gutter icon if there's a valid selection, hides it otherwise.
         """
         # Check if we have a selection
         x0, y0, x1, y1 = ed_self.get_carets()[0]
@@ -247,6 +254,7 @@ class Command:
             self.show_gutter_icon(ed_self, last_line)
         else:
             # No selection, hide icon if not in active sync edit mode
+            # (If we are editing, we keep the icon logic managed by start_sync_edit)
             if self.has_session(ed_self):
                 session = self.get_session(ed_self)
                 if not session.selected and not session.editing:
@@ -285,13 +293,12 @@ class Command:
         3. Groups identical words.
         4. Applies visual markers (colors).
         
-        All configuration is read fresh from file/theme on every start so the user do not need to restart.
+        All configuration is read fresh from file/theme on every start so the user does not need to restart CudaText.
         """
         session = self.get_session(ed_self)
         # now that we created a session we should always call update_gutter_icon_on_selection before start_sync_edit to set gutter_icon_line (set by show_gutter_icon) which will be used in start_sync_edit to set the red/active gutter icon
+        # Update gutter icon before starting to ensure session.gutter_icon_line is set. This allows us to flip it to "Active" (red) mode shortly after.
         self.update_gutter_icon_on_selection(ed_self)
-        
-        # --- Declare all globals that need fresh values ---
         
         carets = ed_self.get_carets()
         if len(carets) != 1:
@@ -346,9 +353,9 @@ class Command:
             session.use_simple_naive_mode = True
         
         # Determine if we use specific lexer rules
-        if cur_lexer in NON_STANDART_LEXERS:
-            # If it is non-standard lexer, change it's behavior
-            local_styles_default = NON_STANDART_LEXERS[cur_lexer]
+        if cur_lexer in NON_STANDARD_LEXERS:
+            # If it is non-standard lexer, change its behavior
+            local_styles_default = NON_STANDARD_LEXERS[cur_lexer]
         else:
             local_styles_default = IDENTIFIER_STYLE_INCLUDE_DEFAULT
         session.identifier_style_include = ini_config.get_lexer_str(cur_lexer, 'identifier_style_include', local_styles_default)
@@ -386,11 +393,11 @@ class Command:
             print(_('ERROR: Sync Editing: Invalid identifier_style_exclude config - using fallback'))
             session.regex_style_exclude = re.compile(IDENTIFIER_STYLE_EXCLUDE_DEFAULT)
 
-        # Run lexer scan form start
-        
+        # NOTE: Do not use app_idle (set_progress) before EDACTION_LEXER_SCAN. 
+        # App_idle runs message processing which can conflict with parsing actions.
         # self.set_progress(10) # do not use this here before ed.action(EDACTION_LEXER_SCAN. see bug: https://github.com/Alexey-T/CudaText/issues/6120 the bug happen only with this line. Alexey said: app_idle is the main reason, it is bad to insert it before some parsing action. Usually app_idle is needed after some action, to run the app message processing. Not before. Dont use it if not nessesary...
         
-        # Force a Lexer scan to ensure tokens are up to date
+        # Run lexer scan from start. Force a Lexer scan to ensure tokens are up to date
         ed_self.action(EDACTION_LEXER_SCAN, session.start_l) #API 1.0.289
         self.set_progress(40)
         
@@ -413,7 +420,7 @@ class Command:
             for y in range(session.start_l, session.end_l+1):
                 cur_line = ed_self.get_text_line(y)
                 for match in session.regex_identifier.finditer(cur_line):
-                    # Create pseudo-token structure
+                    # Create pseudo-token structure: ((x1, y1), (x2, y2), string, style)
                     token = ((match.start(), y), (match.end(), y), match.group(), 'id')
                     if match.group() in session.dictionary:
                         session.dictionary[match.group()].append(token)
@@ -436,12 +443,11 @@ class Command:
                         session.dictionary[idd].append(old_style_token)
                 else:
                     session.dictionary[idd] = [(old_style_token)]
-        # Fix tokens
-        self.set_progress(60)
-        self.fix_tokens(ed_self) # Clean up whitespace issues
-        # Exit if no id's (eg: comments and etc)
         
-        # Validation: Ensure we actually found words to edit
+        self.set_progress(60)
+        self.fix_tokens(ed_self) # Clean up whitespace issues and remove singletons
+        
+        # Validation: Ensure we actually found words to edit. Exit if no id's (eg: comments and etc)
         if len(session.dictionary) == 0:
             self.reset(ed_self)
             msg_status(_('Sync Editing: No editable identifiers found in selection'))
@@ -452,7 +458,7 @@ class Command:
         self.set_progress(90)
         
         # --- 4. Apply Visual Markers ---
-        # Mark all words that we can modify with pretty light color
+        # Visualize all editable identifiers in the selection. Mark all words that we can modify with pretty light color
         self.mark_all_words(ed_self)
         self.set_progress(-1)
         
@@ -463,12 +469,14 @@ class Command:
     # Fix tokens with spaces at the start of the line (eg: ((0, 50), (16, 50), '        original', 'Id')) and remove if it has 1 occurence (issue #44 and #45)
     def fix_tokens(self, ed_self):
         """
-        Trims whitespace from the start of tokens. 
-        Corrects issues where the lexer includes leading spaces in the token range.
-        Then removes any groups with fewer than 2 occurrences.
+        Post-processing of tokens found by Lexer/Regex.
+        1. Trims whitespace from the start of tokens (Lexers sometimes include leading space in ranges).
+        2. Removes any identifiers that have fewer than 2 occurrences (cannot sync-edit a single word).
         """
         session = self.get_session(ed_self)
         new_replace = []
+        
+        # Pass 1: Trim Whitespace
         for key in session.dictionary:
             for key_tuple in session.dictionary[key]:
                 token = key_tuple[2]
@@ -488,24 +496,23 @@ class Command:
         
         # Update the dictionary with corrected tokens (replacements)
         for neww in new_replace:
-            for key in list(session.dictionary.keys()):  # Use list() to avoid runtime errors during iteration if dict changes size
+            for key in list(session.dictionary.keys()):  # Use list() to avoid runtime errors during iteration
                 for i in range(len(session.dictionary[key])):
                     if session.dictionary[key][i] == neww[1]:
                         session.dictionary[key][i] = neww[0]
         
-        # Now, separately remove entries that don't have duplicates (always run this, even if no replacements)
+        # Pass 2: Remove Singletons
+        # We delete keys that don't have duplicates because sync editing requires at least 2 instances.
         todelete = []
         for key in list(session.dictionary.keys()):
             if len(session.dictionary[key]) < 2:
                 todelete.append(key)
         
-        # Remove entries that don't have duplicates
         for dell in todelete:
             session.dictionary.pop(dell, None)
 
-    # Set progress (issue #46)
     def set_progress(self, prg):
-        """Updates the CudaText status bar progress."""
+        """Updates the CudaText status bar progress (fixes issue #46)."""
         app_proc(PROC_PROGRESSBAR, prg)
         app_idle()
 
@@ -581,7 +588,9 @@ class Command:
             if x0 < start_x:
                 continue
 
-            # Allow caret to stay considered "inside" while the token is being grown
+            # Special Check: Allow caret to be at the immediate end of the word being typed.
+            # If the regex matches a string starting at start_x, and the caret is at the end of that match,
+            # we consider it "inside" so the user can continue typing. so this allow caret to stay considered "inside" while the token is being grown
             if session.regex_identifier:
                 match = session.regex_identifier.match(current_line[start_x:]) if start_x <= len(current_line) else None
                 if match:
@@ -680,12 +689,12 @@ class Command:
             return
             
         # --- Start Editing Sequence ---
-        # Clear passive markers
+        # Clear passive markers (background colors)
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
         session.our_key = clicked_key
         session.original = (caret[0], caret[1])
         
-        # Add active carets and borders
+        # Add active carets and borders to ALL instances of the clicked word
         for key_tuple in session.dictionary[session.our_key]:
             ed_self.attr(MARKERS_ADD, tag = MARKER_CODE, \
             x = key_tuple[0][0], y = key_tuple[0][1], \
@@ -698,6 +707,7 @@ class Command:
             border_down=1, \
             border_up=1 \
             )
+            # Add secondary caret at the corresponding offset
             ed_self.set_caret(key_tuple[0][0] + offset, key_tuple[0][1], id=CARET_ADD)
         
         # Update state
@@ -734,11 +744,12 @@ class Command:
         """
         Hooks into caret movement.
         Continuous Edit Logic:
-        If the user moves the caret OUTSIDE the active word, we do NOT exit, we check if landing on another valid ID.
-        - If landing on valid ID: Do nothing (let on_click handle the switch)
-        - If landing elsewhere: We simply 'finish' the edit and return to Selection mode and show colors
+        If the user moves the caret OUTSIDE the active word, we do NOT exit immediately.
+        We check if the landing spot is another valid ID.
+        - If landing on valid ID: Do nothing (let on_click handle the switch seamlessy).
+        - If landing elsewhere: We 'finish' the edit, return to Selection mode, and show colors.
         
-        Also handles showing/hiding gutter icon based on selection.
+        Also handles showing/hiding gutter icon based on selection state.
         """
         # OPTIMIZATION: exit early if sync edit mode is not active
         if not self.has_session(ed_self):
@@ -773,19 +784,19 @@ class Command:
                     if not clicked_key:
                         self.finish_editing(ed_self)
                     # If on a valid ID, do nothing - let on_click handle the transition
-                    # Clicked on a valid ID - switch directly without showing colors, this prevent showing colors for an instant when i switch from an ID to another ID
+                    # This prevents flashing colors when switching directly between IDs
                 else:
                     self.finish_editing(ed_self)
                 return
+            
             # NOTE: self.redraw(ed_self) is called here to update word markers live during typing.
-            # This is a performance hit on simple caret moves (arrow keys) but necessary for live updates.
+            # This recalculates borders and shifts other tokens on the line as the word grows/shrinks. This is a performance hit on simple caret moves (arrow keys) but necessary for live updates.
             self.redraw(ed_self)
 
     def on_key(self, ed_self, key, _state):
         """
         Handles Esc Keyboard input to cancel sync editing.
-        Strict Exit Logic:
-        Only VK_ESCAPE triggers the full 'reset' (Exit).
+        Strict Exit Logic: Only VK_ESCAPE triggers the full 'reset' (Exit).
         """
         # OPTIMIZATION: exit early if sync edit mode is not active
         if not self.has_session(ed_self):
@@ -798,24 +809,22 @@ class Command:
     def on_start2(self, ed_self):
         pass
 
-    # Redraws Id's borders
     def redraw(self, ed_self):
-        # Simple workaround to prevent redraw while redraw
         """
-        Dynamically updates markers during typing.
+        Dynamically updates markers and dictionary positions during typing.
         Because editing changes the length of the word, we must:
-        1. Find the new word at the caret.
-        2. Re-scan the document (dictionary) for that specific word.
-        3. Update positions of ALL words that come after the edit on the same line.
+        1. Find the new word string at the caret position.
+        2. Update the dictionary entry for the currently edited word (start/end positions).
+        3. Shift positions of ALL other words that exist on the same line after the caret.
         4. Re-draw all the borders.
         """
         session = self.get_session(ed_self)
         if not session.our_key:
             return
         
-        # Find out what changed on the first caret (on others changes will be the same)
+        # 1. Capture State. Find out what changed on the first caret (on others changes will be the same)
         old_key = session.our_key
-        session.our_key = None
+        session.our_key = None # Temporarily unset to allow clean lookup
         
         # Get current state at the first caret
         first_y = ed_self.get_carets()[0][1]
@@ -823,86 +832,92 @@ class Command:
         first_y_line = ed_self.get_text_line(first_y)
         start_pos = first_x
         
-        # Backtrack to find start of the word
-        # Workaround for end of id case
-        # If the caret is at the end of a word (e.g. index after the last char),
-        # move back one step to ensure the regex match succeeds.
+        # Backtrack from caret to find start of the new word
+        # Workaround for end of id case: If caret is at the very end, move back 1 to capture the match
         if not session.regex_identifier.match(first_y_line[start_pos:]):
             start_pos -= 1
         
-        # This loop moves start_pos to the position *before* the start of the word
+        # Move start_pos back until we find the beginning of the identifier
         while session.regex_identifier.match(first_y_line[start_pos:]):
             start_pos -= 1
         start_pos += 1
-        # Workaround for EOL #65
+        # Workaround for EOL #65. Safety for EOL/BOL cases
         if start_pos < 0:
             start_pos = 0
         
-        # Check if word became empty (deleted)
-        # Workaround for empty id (eg. when it was deleted) #62
-        if not session.regex_identifier.match(first_y_line[start_pos:]):
+        # Check if word became empty (deleted). Workaround for empty id (eg. when it was deleted) #62
+        match = session.regex_identifier.match(first_y_line[start_pos:])
+        if not match:
+            # Word was deleted completely
             session.our_key = old_key
             ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
             return
             
-        new_key = session.regex_identifier.match(first_y_line[start_pos:]).group(0)
+        new_key = match.group(0)
         if not session.case_sensitive:
             new_key = new_key.lower()
         
-        # Calculate the length change
+        # 2. Calculate Length Delta change
         old_length = len(old_key)
         new_length = len(new_key)
         length_delta = new_length - old_length
         
-        # Get the list of affected lines (lines where we edited)
+        # Identify lines affected by this edit (where this word appears)
         affected_lines = set()
         old_key_dictionary = session.dictionary[old_key]
         for entry in old_key_dictionary:
             affected_lines.add(entry[0][1])  # y coordinate
         
-        # Rebuild dictionary positions for the modified word with new values
+        # 3. Rebuild Dictionary positions for the modified Active Word with new values
         existing_entries = session.dictionary.get(new_key, [])
         pointers = []
         for i in old_key_dictionary:
             pointers.append(i[0])
             
-        # Recalculate positions for all instances of the edited word
+        # Recalculate start/end positions for all instances of the edited word
         for pointer in pointers:
             x = pointer[0]
             y = pointer[1]
             y_line = ed_self.get_text_line(y)
-            # Scan backwards to find start of the new word instance
+            
+            # Scan backwards to find start of the new word instance. Find the new start X for this instance
             while session.regex_identifier.match(y_line[x:]):
                 x -= 1
             x += 1
             # Workaround for EOL #65
             if x < 0:
                 x = 0
+            
+            # Remove old position from target list if it exists (collision handling)
             existing_entries = [item for item in existing_entries if item[0] != (x, y)]
+            # Add new position
             existing_entries.append(((x, y), (x+len(new_key), y), new_key, 'Id'))
         
-        # Update dictionary keys for the edited word
+        # Update dictionary keys for the edited word. Clean up old key if it changed completely
         if old_key != new_key:
             session.dictionary.pop(old_key, None)
         session.dictionary[new_key] = existing_entries
         
-        # Update positions of ALL other words on affected lines
+        # 4. Shift Other Words on the Same Line. Update positions of ALL other words on affected lines
         if length_delta != 0:
             for line_num in affected_lines:
                 # For each edited position on this line, shift words that come after it
+                # Find all X positions where the *edited* word sits on this line
                 edited_positions = [pos[0][0] for pos in existing_entries if pos[0][1] == line_num]
                 
+                # Iterate over ALL other words in the dictionary
                 for other_key in list(session.dictionary.keys()):
                     if other_key == new_key:
                         continue  # Skip the word we just edited
                     
                     updated_entries = []
                     for entry in session.dictionary[other_key]:
-                        if entry[0][1] == line_num:  # Same line
+                        if entry[0][1] == line_num:  # If this word is on the affected line. Same line
                             word_start_x = entry[0][0]
                             word_end_x = entry[1][0]
                             
-                            # Check if this word comes after any of the edited positions
+                            # Calculate total shift: Check if this word comes after any of the edited positions
+                            # If this word is to the right of 3 edited instances, it moves 3 * delta.
                             shift_amount = 0
                             for edit_x in sorted(edited_positions):
                                 if word_start_x > edit_x:
@@ -927,10 +942,10 @@ class Command:
         
         session.our_key = new_key
         
-        # Repaint borders for ALL words
+        # 5. Repaint borders for ALL words
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
         
-        # Draw borders for the currently edited word
+        # Draw active borders for the currently edited word
         for key_tuple in session.dictionary[session.our_key]:
                 ed_self.attr(MARKERS_ADD, tag = MARKER_CODE, \
                 x = key_tuple[0][0], y = key_tuple[0][1], \
