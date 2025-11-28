@@ -258,7 +258,7 @@ class Command:
         self.pattern_styles = re.compile(STYLES)
         self.pattern_styles_no = re.compile(STYLES_NO)
         # Run lexer scan form start
-        self.set_progress(10)
+        #self.set_progress(10)
         
         # Force a Lexer scan to ensure tokens are up to date
         ed.action(EDACTION_LEXER_SCAN, self.start_l) #API 1.0.289
@@ -353,7 +353,7 @@ class Command:
                 token = key_tuple[2]
                 # If token starts with space, calculate offset
                 if token[0] != ' ':
-                    pass
+                    continue
                 offset = 0
                 for i in range(len(token)):
                     if token[i] != ' ':
@@ -514,12 +514,14 @@ class Command:
         if ed_self.get_prop(PROP_TAG, 'sync_edit:0') != '1':
             return
             
+        if not self.selected and not self.editing:
+            return
+        
         # If we were editing, finish that session first
+        # TODO: do i really need to finish editing here? on_caret already handle the case of switching from a valid ID to another valid ID so this seems not necesary anymore but maybe there is a case where it is necesary , so i will keep it for now to make more tests later
+        # but it make clicking on torrent word in the c++ file by alexey faster!!
         if self.editing:
             self.finish_editing(ed_self)
-            
-        if not self.selected:
-            return
             
         carets = ed_self.get_carets()
         if not carets:
@@ -598,8 +600,9 @@ class Command:
         """
         Hooks into caret movement.
         Continuous Edit Logic:
-        If the user moves the caret OUTSIDE the active word, we do NOT exit.
-        We simply 'finish' the edit and return to Selection mode.
+        If the user moves the caret OUTSIDE the active word, we do NOT exit, we check if landing on another valid ID.
+        - If landing on valid ID: Do nothing (let on_click handle the switch)
+        - If landing elsewhere: We simply 'finish' the edit and return to Selection mode and show colors
         
         Also handles showing/hiding gutter icon based on selection.
         """
@@ -609,9 +612,34 @@ class Command:
         
         if ed_self.get_prop(PROP_TAG, 'sync_edit:0') != '1':
             return
+            
         if self.editing:
             if not self.caret_in_current_token(ed_self):
-                self.finish_editing(ed_self)
+                # Caret left current token - check if it's on another valid ID
+                carets = ed_self.get_carets()
+                if carets:
+                    caret = carets[0]
+                    clicked_key = None
+                    
+                    # Check if caret is on a valid ID
+                    for key in self.dictionary:
+                        for key_tuple in self.dictionary[key]:
+                            if  caret[1] >= key_tuple[0][1] \
+                            and caret[1] <= key_tuple[1][1] \
+                            and caret[0] <= key_tuple[1][0] \
+                            and caret[0] >= key_tuple[0][0]:
+                                clicked_key = key
+                                break
+                        if clicked_key:
+                            break
+                    
+                    # If NOT on a valid ID, finish editing and show colors
+                    if not clicked_key:
+                        self.finish_editing(ed_self)
+                    # If on a valid ID, do nothing - let on_click handle the transition
+                    # Clicked on a valid ID - switch directly without showing colors, this prevent showing colors for an instant when i switch from an ID to another ID
+                else:
+                    self.finish_editing(ed_self)
                 return
             self.redraw(ed_self)
 
