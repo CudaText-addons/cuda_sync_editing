@@ -399,6 +399,7 @@ class Command:
         """
         Trims whitespace from the start of tokens. 
         Corrects issues where the lexer includes leading spaces in the token range.
+        Then removes any groups with fewer than 2 occurrences.
         """
         session = self.get_session(ed_self)
         new_replace = []
@@ -407,7 +408,7 @@ class Command:
                 token = key_tuple[2]
                 # If token starts with space, calculate offset
                 if token and token[0] != ' ':
-                    continue
+                    continue  # Skip if no leading space (optimization)
                 offset = 0
                 for i in range(len(token)):
                     if token[i] != ' ':
@@ -419,16 +420,18 @@ class Command:
                 new_tuple = ((new_start, key_tuple[0][1]), key_tuple[1], new_token, key_tuple[3])
                 new_replace.append([new_tuple, key_tuple])
         
-        # Update the dictionary with corrected tokens
-        todelete = []
+        # Update the dictionary with corrected tokens (replacements)
         for neww in new_replace:
-            for key in session.dictionary:
+            for key in list(session.dictionary.keys()):  # Use list() to avoid runtime errors during iteration if dict changes size
                 for i in range(len(session.dictionary[key])):
                     if session.dictionary[key][i] == neww[1]:
                         session.dictionary[key][i] = neww[0]
-                # If dictionary entry has < 2 items after fix, mark for deletion
-                if len(session.dictionary[key]) < 2:
-                    todelete.append(key)
+        
+        # Now, separately remove entries that don't have duplicates (always run this, even if no replacements)
+        todelete = []
+        for key in list(session.dictionary.keys()):
+            if len(session.dictionary[key]) < 2:
+                todelete.append(key)
         
         # Remove entries that don't have duplicates
         for dell in todelete:
@@ -723,8 +726,8 @@ class Command:
             else:
                 self.hide_gutter_icon(ed_self)
                     
-    # def on_caret(self, ed_self):
-    def on_caret_slow(self, ed_self):
+    def on_caret(self, ed_self):
+    # on_caret_slow is better because it will consume less resources but it breaks the colors recalculations when user edit an ID, so stick with on_caret
         """
         Hooks into caret movement.
         Continuous Edit Logic:
