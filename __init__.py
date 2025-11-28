@@ -107,6 +107,7 @@ class Command:
     Manages the Circular State Machine: Selection <-> Editing.
     Can be toggled via gutter icon or command.
     NOW SUPPORTS MULTIPLE FILES - one session per file.
+    OPTIMIZED: Does nothing when not in use to save resources.
     """
     
     def __init__(self):
@@ -139,11 +140,15 @@ class Command:
         """Gets or creates a session for the current editor."""
         handle = self.get_editor_handle(ed_self)
         if handle not in self.sessions:
+            print("============creates a session:",handle)
             self.sessions[handle] = SyncEditSession()
         return self.sessions[handle]
     
     def has_session(self, ed_self):
-        """Checks if editor has an active session."""
+        """
+        Checks if editor has an active session.
+        Allows checking for session existence without instantiating one.
+        """
         handle = self.get_editor_handle(ed_self)
         return handle in self.sessions
     
@@ -154,9 +159,13 @@ class Command:
             del self.sessions[handle]
 
 
+    def is_sync_active(self, ed_self):
+        """Check if sync edit is active using PROP_TAG (lightweight check)."""
+        return ed_self.get_prop(PROP_TAG, 'cuda_sync_editing:undefined') == 'active'
+
+
     def show_gutter_icon(self, ed_self, line_index, active=False):
         """Shows the gutter icon at the specified line."""
-        session = self.get_session(ed_self)
         # Remove any existing gutter icon
         self.hide_gutter_icon(ed_self)
         
@@ -165,36 +174,21 @@ class Command:
         
         ed_self.decor(DECOR_SET, line=line_index, tag=DECOR_TAG, text="≡", color=color, bold=True, italic=False, image=-1, auto_del=False)
         
-        session.gutter_icon_line = line_index
-        session.gutter_icon_active = True
+        if self.has_session(ed_self):
+            session = self.get_session(ed_self)
+            session.gutter_icon_line = line_index
+            session.gutter_icon_active = True
     
     
     def hide_gutter_icon(self, ed_self):
         """Removes the gutter icon."""
-        session = self.get_session(ed_self)
-        if session.gutter_icon_active:
-            ed_self.decor(DECOR_DELETE_BY_TAG, -1, DECOR_TAG)
+        ed_self.decor(DECOR_DELETE_BY_TAG, -1, DECOR_TAG)
+        if self.has_session(ed_self):
+            session = self.get_session(ed_self)
             session.gutter_icon_line = None
             session.gutter_icon_active = False
-    
-    
-    def update_gutter_icon_on_selection(self, ed_self):
-        """
-        Called when selection changes. Shows gutter icon if there's a valid selection.
-        """
-        session = self.get_session(ed_self)
-        # Check if we have a selection
-        x0, y0, x1, y1 = ed_self.get_carets()[0]
-        if y1 >= 0 and (y0 != y1 or x0 != x1):  # Has selection
-            # Show icon at the last line of selection
-            last_line = max(y0, y1)
-            self.show_gutter_icon(ed_self, last_line)
-        else:
-            # No selection, hide icon if not in active sync edit mode
-            if not session.selected and not session.editing:
-                self.hide_gutter_icon(ed_self)
-    
-    
+
+
     def token_style_ok(self, ed_self, s):
         """Checks if a token's style matches the allowed patterns (IDs) and rejects Keywords."""
         session = self.get_session(ed_self)
@@ -229,6 +223,8 @@ class Command:
         4. Applies visual markers (colors).
         """
         session = self.get_session(ed_self)
+        # now that we created a session we should always call update_gutter_icon_on_selection before start_sync_edit to set gutter_icon_line (set by show_gutter_icon) which will be used in start_sync_edit to set the red/active gutter icon
+        self.update_gutter_icon_on_selection(ed_self)
         
         global FIND_REGEX
         global CASE_SENSITIVE
@@ -239,6 +235,7 @@ class Command:
         
         carets = ed_self.get_carets()
         if len(carets)!=1:
+            self.reset(ed_self)
             msg_status(_('Sync Editing: Need single caret'))
             return
         caret = carets[0]
@@ -251,6 +248,7 @@ class Command:
         # --- 1. Selection Handling ---
         # Check if we have selection of text
         if not original and session.saved_sel is None:
+            self.reset(ed_self)
             msg_status(_('Sync Editing: Make selection first'))
             return
         
@@ -278,7 +276,7 @@ class Command:
         
         # Mark the range properties for CudaText
         ed_self.set_prop(PROP_MARKED_RANGE, (session.start_l, session.end_l))
-        ed_self.set_prop(PROP_TAG, 'sync_edit:1') # Tag editor state as 'sync active'
+        ed_self.set_prop(PROP_TAG, 'cuda_sync_editing:active') # Tag editor state as 'sync active'
 
 
         # --- 2. Lexer / Parser Configuration ---
@@ -305,6 +303,7 @@ class Command:
         session.pattern_styles = re.compile(STYLES)
         session.pattern_styles_no = re.compile(STYLES_NO)
         # Run lexer scan form start
+        
         # self.set_progress(10) # do not use this here before ed.action(EDACTION_LEXER_SCAN. see bug: https://github.com/Alexey-T/CudaText/issues/6120 the bug happen only with this line. Alexey said: app_idle is the main reason, it is bad to insert it before some parsing action. Usually app_idle is needed after some action, to run the app message processing. Not before. Dont use it if not nessesary...
         
         # Force a Lexer scan to ensure tokens are up to date
@@ -532,8 +531,7 @@ class Command:
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
         ed_self.set_prop(PROP_MARKED_RANGE, (-1, -1))
         self.set_progress(-1)
-        # Clear the active tag
-        ed_self.set_prop(PROP_TAG, 'sync_edit:0')
+        ed_self.set_prop(PROP_TAG, 'cuda_sync_editing:inactive') # Tag editor state as 'sync inactive'
         
         # Hide gutter icon
         self.hide_gutter_icon(ed_self)
@@ -564,8 +562,9 @@ class Command:
            - Yes: Start Editing (Add carets, borders).
            - No: Do nothing (Do not exit).
         """
-        # Check if plugin is active
-        if ed_self.get_prop(PROP_TAG, 'sync_edit:0') != '1':
+        # OPTIMIZATION: exit early if sync edit mode is not active
+        # if not ed_self.get_prop(PROP_TAG, 'cuda_sync_editing:undefined') == 'active':
+        if not self.is_sync_active(ed_self):
             return
         
         session = self.get_session(ed_self)
@@ -693,6 +692,7 @@ class Command:
                 if decor.get('tag') == DECOR_TAG:
                     # User clicked on our sync edit icon
                     session = self.get_session(ed_self)
+                    
                     if session.selected or session.editing:
                         # If already in sync edit mode, exit
                         self.reset(ed_self)
@@ -704,8 +704,27 @@ class Command:
         # Not our decoration, allow default processing
         return None
 
-    
-    def on_caret(self, ed_self):
+    def update_gutter_icon_on_selection(self, ed_self):
+        """
+        Called when selection changes. Shows gutter icon if there's a valid selection.
+        """
+        # Check if we have a selection
+        x0, y0, x1, y1 = ed_self.get_carets()[0]
+        if y1 >= 0 and (y0 != y1 or x0 != x1):  # Has selection
+            # Show icon at the last line of selection
+            last_line = max(y0, y1)
+            self.show_gutter_icon(ed_self, last_line)
+        else:
+            # No selection, hide icon if not in active sync edit mode
+            if self.has_session(ed_self):
+                session = self.get_session(ed_self)
+                if not session.selected and not session.editing:
+                    self.hide_gutter_icon(ed_self)
+            else:
+                self.hide_gutter_icon(ed_self)
+                    
+    # def on_caret(self, ed_self):
+    def on_caret_slow(self, ed_self):
         """
         Hooks into caret movement.
         Continuous Edit Logic:
@@ -714,19 +733,18 @@ class Command:
         
         Also handles showing/hiding gutter icon based on selection.
         """
-        # Only manage session if it exists
+        # OPTIMIZATION: exit early if sync edit mode is not active
+        # TODO: which one is faster
         if not self.has_session(ed_self):
+        # if not self.is_sync_active(ed_self):
+        # if not ed_self.get_prop(PROP_TAG, 'cuda_sync_editing:undefined') == 'active':
+            # Only show/hide gutter icon when NOT in sync edit mode
             self.update_gutter_icon_on_selection(ed_self)
             return
-            
+        
+        # Now we know sync edit is active, get session
         session = self.get_session(ed_self)
         
-        # Update gutter icon based on selection (only if not in active sync edit mode)
-        if not session.selected and not session.editing:
-            self.update_gutter_icon_on_selection(ed_self)
-        
-        if ed_self.get_prop(PROP_TAG, 'sync_edit:0') != '1':
-            return
         if session.editing:
             if not self.caret_in_current_token(ed_self):
                 self.finish_editing(ed_self)
@@ -740,7 +758,9 @@ class Command:
         Strict Exit Logic:
         Only VK_ESCAPE triggers the full 'reset' (Exit).
         """
-        if ed_self.get_prop(PROP_TAG, 'sync_edit:0') != '1':
+        # OPTIMIZATION: exit early if sync edit mode is not active
+        # if not ed_self.get_prop(PROP_TAG, 'cuda_sync_editing:undefined') == 'active':
+        if not self.is_sync_active(ed_self):
             return
             
         if key == VK_ESCAPE:
@@ -843,6 +863,7 @@ class Command:
 
 
     def config(self):
+        print("self.sessions", len(self.sessions),self.sessions) # TODO delete
         """Opens the configuration/readme file."""
         if msg_box(_('Open plugin\'s readme.txt to read about configuring?'), 
                 MB_OKCANCEL+MB_ICONQUESTION) == ID_OK:
