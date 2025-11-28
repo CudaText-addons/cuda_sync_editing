@@ -13,6 +13,19 @@ from cudax_lib import html_color_to_int, get_opt, set_opt, CONFIG_LEV_USER, CONF
 from cudax_lib import get_translation
 _ = get_translation(__file__)  # I18N
 
+# --- Plugin Description & Logic ---
+# This plugin enables Synchronous Editing (multi-cursor editing) within a specific selection.
+# 
+# WORKFLOW (Continuous Mode):
+# 1. Activation: User selects text and runs the command.
+# 2. Analysis: The plugin scans for identifiers (variables, etc.) and highlights them with background colors.
+# 3. Interaction Loop (Circular State Machine):
+#    - [Selection State]: User sees highlighted words. Clicking a word triggers [Edit State].
+#    - [Edit State]: Multi-carets are placed. User types. 
+#      -> If user clicks another word: Previous edit commits, new edit starts immediately.
+#      -> If user moves caret off-word: Edit commits, returns to [Selection State].
+# 4. Exit: Pressing 'ESC' or running the command again fully terminates the session.
+
 # Generate a unique integer tag for this plugin's markers to avoid conflicts with other plugins
 # Uniq value for all marker plugins
 MARKER_CODE = app_proc(PROC_GET_UNIQUE_TAG, '') 
@@ -60,7 +73,8 @@ def theme_color(name, is_font):
 class Command:
     """
     Main Logic for Sync Editing.
-    Manages the state machine: Selection -> Color Highlighting -> Multi-Caret Editing.
+    Manages the Circular State Machine: Selection <-> Editing.
+    Exits only on Explicit Command (Esc).
     """
     start = None
     end = None
@@ -71,7 +85,6 @@ class Command:
     original = None # Original caret position before editing
     start_l = None  # Start line of selection
     end_l = None    # End line of selection
-    want_exit = False
     saved_sel = None
     pattern = None
     pattern_styles = None
@@ -137,6 +150,7 @@ class Command:
             return
         
         self.set_progress(3)
+        self.dictionary = {}
         
         # If we are resuming a session or starting new
         if self.saved_sel is not None:
@@ -181,11 +195,13 @@ class Command:
         self.pattern_styles = re.compile(STYLES)
         self.pattern_styles_no = re.compile(STYLES_NO)
         # Run lexer scan form start
-        self.set_progress(10)
+        
+        # self.set_progress(10) # do not use this here before ed.action(EDACTION_LEXER_SCAN. see bug: https://github.com/Alexey-T/CudaText/issues/6120 the bug happen only with this line. Alexey said: app_idle is the main reason, it is bad to insert it before some parsing action. Usually app_idle is needed after some action, to run the app message processing. Not before. Dont use it if not nessesary...
         
         # Force a Lexer scan to ensure tokens are up to date
         ed.action(EDACTION_LEXER_SCAN, self.start_l) #API 1.0.289
         self.set_progress(40)
+        
         # Find all occurences of regex
         # Get all tokens in the selected range
         tokenlist = ed.get_token(TOKEN_LIST_SUB, self.start_l, self.end_l)
@@ -255,28 +271,10 @@ class Command:
         
         # --- 4. Apply Visual Markers ---
         # Mark all words that we can modify with pretty light color
-        if MARK_COLORS:
-            rand_color = randomcolor.RandomColor()
-            for key in self.dictionary:
-                # Generate a unique light color for each unique word
-                color  = html_color_to_int(rand_color.generate(luminosity='light')[0])
-                for key_tuple in self.dictionary[key]:
-                    ed.attr(MARKERS_ADD,
-                        tag = MARKER_CODE,
-                        x = key_tuple[0][0],
-                        y = key_tuple[0][1],
-                        len = key_tuple[1][0] - key_tuple[0][0],
-                        color_font = 0xb000000,
-                        color_bg = color,
-                        color_border = 0xb000000, 
-                        border_down = 1
-                        )
+        self.mark_all_words(ed)
         self.set_progress(-1)
         
-        if self.want_exit:
-            msg_status(_('Sync Editing: Cancel? Click somewhere else to cancel, or on ID to continue.'))
-        else:
-            msg_status(_('Sync Editing: Click on ID to edit it, or somewhere else to cancel'))
+        msg_status(_('Sync Editing: Click an ID to edit, press Esc or use Cancel to exit.'))
         # restore caret but w/o selection
         restore_caret()
         
@@ -326,10 +324,82 @@ class Command:
         """Updates the CudaText status bar progress."""
         app_proc(PROC_PROGRESSBAR, prg)
         app_idle()
-    
-    
+
+
+    def mark_all_words(self, ed_self):
+        """
+        Visualizes all editable identifiers in the selection.
+        Used during initialization and when returning to selection mode after an edit.
+        """
+        ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
+        if not MARK_COLORS:
+            return
+        rand_color = randomcolor.RandomColor()
+        for key in self.dictionary:
+            # Generate unique color for every unique word
+            color  = html_color_to_int(rand_color.generate(luminosity='light')[0])
+            for key_tuple in self.dictionary[key]:
+                ed_self.attr(MARKERS_ADD,
+                    tag = MARKER_CODE,
+                    x = key_tuple[0][0],
+                    y = key_tuple[0][1],
+                    len = key_tuple[1][0] - key_tuple[0][0],
+                    color_font = 0xb000000,
+                    color_bg = color,
+                    color_border = 0xb000000,
+                    border_down = 1
+                    )
+
+
+    def finish_editing(self, ed_self):
+        """
+        Transitions the state from 'Editing' back to 'Selection/Viewing'.
+        Crucial for Continuous Editing: It saves the current state and re-enables
+        highlighting for other words without exiting the plugin.
+        """
+        if not self.editing:
+            return
+        
+        # Ensure the final edit is captured in dictionary
+        if self.caret_in_current_token(ed_self):
+            self.redraw(ed_self)
+            
+        # Remove the "Active Editing" markers (borders)
+        ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
+        
+        # Reset flags to 'Selection' mode
+        self.original = None
+        self.editing = False
+        self.selected = True
+        self.our_key = None
+        
+        # Re-paint markers so user can see what else to edit
+        self.mark_all_words(ed_self)
+
+
+    def caret_in_current_token(self, ed_self):
+        """
+        Helper: Checks if the primary caret is strictly inside 
+        the boundaries of the word currently being edited.
+        """
+        if not self.our_key:
+            return False
+        carets = ed_self.get_carets()
+        if not carets:
+            return False
+        x0, y0, x1, y1 = carets[0]
+        for key_tuple in self.dictionary.get(self.our_key, []):
+            if y0 == key_tuple[0][1] and key_tuple[0][0] <= x0 <= key_tuple[1][0]:
+                return True
+        return False
+
+
     def reset(self):
-        """Resets the plugin state, clears markers, and releases selection lock."""
+        """
+        FULLY Exits the plugin.
+        Clears markers, releases selection lock, and resets all state variables.
+        Triggered via 'Toggle' command or 'ESC' key.
+        """
         self.start = None
         self.end = None
         self.selected = False
@@ -339,14 +409,13 @@ class Command:
         self.offset = None
         self.start_l = None
         self.end_l = None
-        self.want_exit = False
         self.pattern = None
         self.pattern_styles = None
         self.pattern_styles_no = None
         self.naive_mode = False
         self.saved_sel = None
         
-        # Restore original caret position if saved
+        # Restore original position if needed
         if self.original:
             ed.set_caret(self.original[0], self.original[1], id=CARET_SET_ONE)
             self.original = None
@@ -355,6 +424,7 @@ class Command:
         ed.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
         ed.set_prop(PROP_MARKED_RANGE, (-1, -1))
         self.set_progress(-1)
+        # Clear the active tag
         ed.set_prop(PROP_TAG, 'sync_edit:0')
         msg_status(_('Sync Editing: Cancelled'))
 
@@ -367,123 +437,105 @@ class Command:
 
     def on_click(self, ed_self, state):
         """
-        Handles click logic.
-        1. If in 'Selection' mode: Detects which word was clicked, adds multi-carets.
-        2. If in 'Editing' mode: Finalizes edit or resets.
+        Handles mouse clicks to toggle between 'Viewing' and 'Editing'.
+        Logic:
+        1. If Editing -> Finish current edit (Loop back to Selection).
+        2. If Selection -> Check if click is on valid ID.
+           - Yes: Start Editing (Add carets, borders).
+           - No: Do nothing (Do not exit).
         """
-        global CASE_SENSITIVE
-        global FIND_REGEX
-        global ASK_TO_EXIT
-        
         # Check if plugin is active
         if ed_self.get_prop(PROP_TAG, 'sync_edit:0') != '1':
             return
-
-        if self.selected:
-            # --- Transition from Selection -> Editing ---
-            # Find where we are
-            self.our_key = None
-            caret = ed_self.get_carets()[0]
             
-            # Detect which word in our dictionary overlaps with the click position
-            for key in self.dictionary:
-                for key_tuple in self.dictionary[key]:
-                    if  caret[1] >= key_tuple[0][1] \
-                    and caret[1] <= key_tuple[1][1] \
-                    and caret[0] <= key_tuple[1][0] \
-                    and caret[0] >= key_tuple[0][0]:
-                        self.our_key = key
-                        self.offset = caret[0] - key_tuple[0][0]
+        # If we were editing, finish that session first
+        if self.editing:
+            self.finish_editing(ed_self)
             
-            # Reset if None
-            # If click was NOT on a marked word
-            if not self.our_key:
-                if not self.want_exit:
-                    msg_status(_('Sync Editing: Not a word! Click another, or click somewhere else again'))
-                    self.want_exit = True
-                    return
-                else:
-                    # Second click outside triggers exit confirmation
-                    if not ASK_TO_EXIT:
-                        self.reset()
-                        self.saved_sel = None
-                        return
-                    if msg_box(_('Do you want to cancel Sync Editing mode?'), MB_YESNO+MB_ICONQUESTION) == ID_YES:
-                        self.reset()
-                        self.saved_sel = None
-                        return
-                    else:
-                        self.want_exit = False
-                        return
-
-            # Clear generic background colors
-            ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
+        if not self.selected:
+            return
             
-            # Save original caret to restore later
-            self.original = (caret[0], caret[1])
+        carets = ed_self.get_carets()
+        if not carets:
+            return
             
-            # Apply "Active Editing" markers and Add Carets
-            # Select editable word
-            for key_tuple in self.dictionary[self.our_key]:
-                ed_self.attr(MARKERS_ADD, tag = MARKER_CODE, \
-                x = key_tuple[0][0], y = key_tuple[0][1], \
-                len = key_tuple[1][0] - key_tuple[0][0], \
-                color_font=MARKER_F_COLOR, \
-                color_bg=MARKER_BG_COLOR, \
-                color_border=MARKER_BORDER_COLOR, \
-                border_left=1, \
-                border_right=1, \
-                border_down=1, \
-                border_up=1 \
-                )
-                # Add a caret at the correct offset for every instance of the word
-                ed_self.set_caret(key_tuple[0][0] + self.offset, key_tuple[0][1], id=CARET_ADD)
+        self.our_key = None
+        caret = carets[0]
+        
+        # Find which word was clicked
+        for key in self.dictionary:
+            for key_tuple in self.dictionary[key]:
+                if  caret[1] >= key_tuple[0][1] \
+                and caret[1] <= key_tuple[1][1] \
+                and caret[0] <= key_tuple[1][0] \
+                and caret[0] >= key_tuple[0][0]:
+                    self.our_key = key
+                    self.offset = caret[0] - key_tuple[0][0]
+                    
+        # If click was NOT on a valid word
+        if not self.our_key:
+            msg_status(_('Sync Editing: Not a word! Click on ID to edit it.'))
+            return
             
-            # Transition State
-            # Reset selection
-            self.selected = False
-            self.editing = True
-            
-            # Save boundary of the first caret to detect if user moves off-line
-            # Save 'green' position of first caret
-            first_caret = ed_self.get_carets()[0]
-            self.start = first_caret[1]
-            self.end = first_caret[3]
-            
-            # Normalize selection direction
-            # support reverse selection
-            if self.start > self.end and not self.end == -1: # If not selected, cudatext returns -1
-                self.start, self.end = self.end, self.start
-                
-        elif self.editing:
-            # --- Transition from Editing -> Reset ---
-            self.editing = False
-            first_caret = ed_self.get_carets()[0]
-            self.reset()
-            ed_self.set_caret(*first_caret)
-            self.toggle()
+        # --- Start Editing Sequence ---
+        # Clear passive markers
+        ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
+        self.original = (caret[0], caret[1])
+        
+        # Add active carets and borders
+        for key_tuple in self.dictionary[self.our_key]:
+            ed_self.attr(MARKERS_ADD, tag = MARKER_CODE, \
+            x = key_tuple[0][0], y = key_tuple[0][1], \
+            len = key_tuple[1][0] - key_tuple[0][0], \
+            color_font=MARKER_F_COLOR, \
+            color_bg=MARKER_BG_COLOR, \
+            color_border=MARKER_BORDER_COLOR, \
+            border_left=1, \
+            border_right=1, \
+            border_down=1, \
+            border_up=1 \
+            )
+            ed_self.set_caret(key_tuple[0][0] + self.offset, key_tuple[0][1], id=CARET_ADD)
+        
+        # Update state
+        self.selected = False
+        self.editing = True
+        
+        # Track bounds
+        first_caret = ed_self.get_carets()[0]
+        self.start = first_caret[1]
+        self.end = first_caret[3]
+        if self.start > self.end and not self.end == -1:
+            self.start, self.end = self.end, self.start
             
     
     def on_caret(self, ed_self):
         """
         Hooks into caret movement.
-        If the user moves the caret off the line being edited, we cancel the session.
+        Continuous Edit Logic:
+        If the user moves the caret OUTSIDE the active word, we do NOT exit.
+        We simply 'finish' the edit and return to Selection mode.
         """
         if ed_self.get_prop(PROP_TAG, 'sync_edit:0') != '1':
             return
         if self.editing:
-            # Check if we left the original line
-            # If we leaved original line, we have to break selection
-            first_caret = ed_self.get_carets()[0]
-            x0, y0, x1, y1 = first_caret
-            if y0 != self.start:
-                self.editing = False
-                self.reset()
-                ed_self.set_caret(*first_caret)
-                self.toggle()
-            # Trigger redraw to update borders as text length changes
-            # If amount of text changed, we have to redraw it.
+            if not self.caret_in_current_token(ed_self):
+                self.finish_editing(ed_self)
+                return
             self.redraw(ed_self)
+
+
+    def on_key(self, ed_self, key, state):
+        """
+        Handles Esc Keyboard input to cancel sync editing.
+        Strict Exit Logic:
+        Only VK_ESCAPE triggers the full 'reset' (Exit).
+        """
+        if ed_self.get_prop(PROP_TAG, 'sync_edit:0') != '1':
+            return
+        if key == VK_ESCAPE:
+            self.reset()
+            return False
      
      
     # Redraws Id's borders
@@ -532,9 +584,7 @@ class Command:
             
         # Rebuild dictionary positions for the modified word with new values
         old_key_dictionary = self.dictionary[old_key]
-        self.dictionary = {}
-        self.dictionary[new_key] = []
-        
+        existing_entries = self.dictionary.get(new_key, [])
         pointers = []
         for i in old_key_dictionary:
             pointers.append(i[0])
@@ -551,8 +601,13 @@ class Command:
             # Workaround for EOL #65
             if x < 0:
                 x = 0
-            
-            self.dictionary[new_key].append(((x, y), (x+len(new_key), y), new_key, 'Id'))
+            existing_entries = [item for item in existing_entries if item[0] != (x, y)]
+            existing_entries.append(((x, y), (x+len(new_key), y), new_key, 'Id'))
+        
+        # Update dictionary keys
+        if old_key != new_key:
+            self.dictionary.pop(old_key, None)
+        self.dictionary[new_key] = existing_entries
         # End rebuilding dictionary
         self.our_key = new_key
         
