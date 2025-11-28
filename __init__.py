@@ -17,18 +17,20 @@ _ = get_translation(__file__)  # I18N
 # This plugin enables Synchronous Editing (multi-cursor editing) within a specific selection.
 # 
 # WORKFLOW (Continuous Mode):
-# 1. Activation: User selects text and runs the command.
-# 2. Analysis: The plugin scans for identifiers (variables, etc.) and highlights them with background colors.
-# 3. Interaction Loop (Circular State Machine):
+# 1. Activation: User selects text and a gutter icon appears on the last line of selection
+# 2. User clicks the gutter icon to start sync editing
+# 3. Analysis: The plugin scans for identifiers (variables, etc.) and highlights them with background colors.
+# 4. Interaction Loop (Circular State Machine):
 #    - [Selection State]: User sees highlighted words. Clicking a word triggers [Edit State].
 #    - [Edit State]: Multi-carets are placed. User types. 
 #      -> If user clicks another word: Previous edit commits, new edit starts immediately.
 #      -> If user moves caret off-word: Edit commits, returns to [Selection State].
-# 4. Exit: Pressing 'ESC' or running the command again fully terminates the session.
+# 5. Exit: Clicking the gutter icon again or pressing 'ESC' fully terminates the session.
 
 # Generate a unique integer tag for this plugin's markers to avoid conflicts with other plugins
 # Uniq value for all marker plugins
 MARKER_CODE = app_proc(PROC_GET_UNIQUE_TAG, '') 
+DECOR_TAG = app_proc(PROC_GET_UNIQUE_TAG, '')  # Unique tag for gutter decorations
 
 # --- Default Configuration ---
 CASE_SENSITIVE = True
@@ -52,6 +54,9 @@ NAIVE_LEXERS = [
   'Markdown', # it has 'Text' rule for many chars, including punctuation+spaces
   'reStructuredText',
   'Textile',
+  'ToDo',
+  'Todo.txt',
+  'JSON',
 ]
 
 # Visual settings for the markers
@@ -74,7 +79,7 @@ class Command:
     """
     Main Logic for Sync Editing.
     Manages the Circular State Machine: Selection <-> Editing.
-    Exits only on Explicit Command (Esc).
+    Can be toggled via gutter icon or command.
     """
     start = None
     end = None
@@ -90,6 +95,8 @@ class Command:
     pattern_styles = None
     pattern_styles_no = None
     naive_mode = False
+    gutter_icon_line = None  # Line where gutter icon is displayed
+    gutter_icon_active = False  # Whether gutter icon is currently shown
     
     
     def __init__(self):
@@ -108,6 +115,44 @@ class Command:
         # Load user preferences from user.json
         ASK_TO_EXIT = get_opt('syncedit_ask_to_exit', True, lev=CONFIG_LEV_USER)
         MARK_COLORS = get_opt('syncedit_mark_words', True, lev=CONFIG_LEV_USER)
+
+
+    def show_gutter_icon(self, line_index, active=False):
+        """Shows the gutter icon at the specified line."""
+        # Remove any existing gutter icon
+        self.hide_gutter_icon()
+        
+        # Choose color based on active state
+        color = 0x0000AA if active else 0x00AA00  # Red when active, green when inactive
+        
+        ed.decor(DECOR_SET, line=line_index, tag=DECOR_TAG, text="≡", color=color, bold=True, italic=False, image=-1, auto_del=False)
+        
+        self.gutter_icon_line = line_index
+        self.gutter_icon_active = True
+    
+    
+    def hide_gutter_icon(self):
+        """Removes the gutter icon."""
+        if self.gutter_icon_active:
+            ed.decor(DECOR_DELETE_BY_TAG, -1, DECOR_TAG)
+            self.gutter_icon_line = None
+            self.gutter_icon_active = False
+    
+    
+    def update_gutter_icon_on_selection(self):
+        """
+        Called when selection changes. Shows gutter icon if there's a valid selection.
+        """
+        # Check if we have a selection
+        x0, y0, x1, y1 = ed.get_carets()[0]
+        if y1 >= 0 and (y0 != y1 or x0 != x1):  # Has selection
+            # Show icon at the last line of selection
+            last_line = max(y0, y1)
+            self.show_gutter_icon(last_line)
+        else:
+            # No selection, hide icon if not in active sync edit mode
+            if not self.selected and not self.editing:
+                self.hide_gutter_icon()
     
     
     def token_style_ok(self, s):
@@ -119,7 +164,21 @@ class Command:
 
     def toggle(self):
         """
-        Main Entry Point.
+        Main Entry Point - can be called from command or gutter click.
+        If already active, exits. Otherwise starts sync editing.
+        """
+        # If already in sync edit mode, exit
+        if self.selected or self.editing:
+            self.reset()
+            return
+        
+        # Otherwise, start sync editing
+        self.start_sync_edit()
+    
+    
+    def start_sync_edit(self):
+        """
+        Starts sync editing session.
         1. Validates selection.
         2. Scans text (via Lexer or Regex).
         3. Groups identical words.
@@ -167,6 +226,10 @@ class Command:
         # Mark text that was selected
         self.set_progress(5)
         
+        # Update gutter icon to show active state (change color to red)
+        if self.gutter_icon_line is not None:
+            self.show_gutter_icon(self.gutter_icon_line, active=True)
+        
         # Mark the range properties for CudaText
         ed.set_prop(PROP_MARKED_RANGE, (self.start_l, self.end_l))
         ed.set_prop(PROP_TAG, 'sync_edit:1') # Tag editor state as 'sync active'
@@ -195,8 +258,7 @@ class Command:
         self.pattern_styles = re.compile(STYLES)
         self.pattern_styles_no = re.compile(STYLES_NO)
         # Run lexer scan form start
-        
-        # self.set_progress(10) # do not use this here before ed.action(EDACTION_LEXER_SCAN. see bug: https://github.com/Alexey-T/CudaText/issues/6120 the bug happen only with this line. Alexey said: app_idle is the main reason, it is bad to insert it before some parsing action. Usually app_idle is needed after some action, to run the app message processing. Not before. Dont use it if not nessesary...
+        self.set_progress(10)
         
         # Force a Lexer scan to ensure tokens are up to date
         ed.action(EDACTION_LEXER_SCAN, self.start_l) #API 1.0.289
@@ -274,7 +336,7 @@ class Command:
         self.mark_all_words(ed)
         self.set_progress(-1)
         
-        msg_status(_('Sync Editing: Click an ID to edit, press Esc or use Cancel to exit.'))
+        msg_status(_('Sync Editing: Click an ID to edit, click gutter icon or press Esc to exit.'))
         # restore caret but w/o selection
         restore_caret()
         
@@ -398,7 +460,7 @@ class Command:
         """
         FULLY Exits the plugin.
         Clears markers, releases selection lock, and resets all state variables.
-        Triggered via 'Toggle' command or 'ESC' key.
+        Triggered via 'Toggle' command, gutter icon click, or 'ESC' key.
         """
         self.start = None
         self.end = None
@@ -426,6 +488,10 @@ class Command:
         self.set_progress(-1)
         # Clear the active tag
         ed.set_prop(PROP_TAG, 'sync_edit:0')
+        
+        # Hide gutter icon
+        self.hide_gutter_icon()
+        
         msg_status(_('Sync Editing: Cancelled'))
 
     def doclick(self):
@@ -507,7 +573,26 @@ class Command:
         self.end = first_caret[3]
         if self.start > self.end and not self.end == -1:
             self.start, self.end = self.end, self.start
-            
+
+
+    def on_click_gutter(self, ed_self, state, nline, nband):
+        """
+        Handles clicks on the gutter area.
+        If user clicks on the sync edit icon, toggle the sync editing mode.
+        """
+        # Check if there's a decoration on this line with our tag
+        decorations = ed_self.decor(DECOR_GET_ALL, nline)
+        
+        if decorations:
+            for decor in decorations:
+                if decor.get('tag') == DECOR_TAG:
+                    # User clicked on our sync edit icon
+                    self.toggle()
+                    return False  # Prevent default processing
+        
+        # Not our decoration, allow default processing
+        return None
+
     
     def on_caret(self, ed_self):
         """
@@ -515,7 +600,13 @@ class Command:
         Continuous Edit Logic:
         If the user moves the caret OUTSIDE the active word, we do NOT exit.
         We simply 'finish' the edit and return to Selection mode.
+        
+        Also handles showing/hiding gutter icon based on selection.
         """
+        # Update gutter icon based on selection (only if not in active sync edit mode)
+        if not self.selected and not self.editing:
+            self.update_gutter_icon_on_selection()
+        
         if ed_self.get_prop(PROP_TAG, 'sync_edit:0') != '1':
             return
         if self.editing:
@@ -536,8 +627,12 @@ class Command:
         if key == VK_ESCAPE:
             self.reset()
             return False
-     
-     
+
+
+    def on_start2(self, ed_self):
+        pass
+
+
     # Redraws Id's borders
     def redraw(self, ed_self):
         # Simple workaround to prevent redraw while redraw
