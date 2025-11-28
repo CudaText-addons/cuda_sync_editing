@@ -32,23 +32,11 @@ _ = get_translation(__file__)  # I18N
 USE_COLORS_DEFAULT = True
 USE_SIMPLE_NAIVE_MODE_DEFAULT = False
 CASE_SENSITIVE_DEFAULT = True
-FIND_REGEX_DEFAULT = r'\w+'
-# FIND_REGEX_DEFAULT = r'\b\w+\b'
+IDENTIFIER_REGEX_DEFAULT = r'\w+'
+# IDENTIFIER_REGEX_DEFAULT = r'\b\w+\b'
 # Regex to identify valid tokens (identifiers) vs invalid ones
-STYLES_DEFAULT = r'(?i)id[\w\s]*'       # Styles that are considered "Identifiers"
-STYLES_NO_DEFAULT = '(?i).*keyword.*'   # Styles that are strictly keywords (should not be edited)
-
-USE_COLORS = USE_COLORS_DEFAULT
-USE_SIMPLE_NAIVE_MODE = USE_SIMPLE_NAIVE_MODE_DEFAULT
-CASE_SENSITIVE = CASE_SENSITIVE_DEFAULT
-FIND_REGEX = FIND_REGEX_DEFAULT
-STYLES = STYLES_DEFAULT
-STYLES_NO = STYLES_NO_DEFAULT
-
-# Visual settings for the markers
-MARKER_BG_COLOR = 0xFFAAAA
-MARKER_F_COLOR  = 0x005555
-MARKER_BORDER_COLOR = 0xFF0000
+IDENTIFIER_STYLE_INCLUDE_DEFAULT = r'(?i)id[\w\s]*'    # Styles that are considered "Identifiers"
+IDENTIFIER_STYLE_EXCLUDE_DEFAULT = '(?i).*keyword.*'   # Styles that are strictly keywords (should not be edited)
 
 CONFIG_FILENAME = 'cuda_sync_editing.ini'
 
@@ -90,9 +78,9 @@ GLOBAL_DEFAULTS = {
     'use_colors': bool_to_ini(USE_COLORS_DEFAULT),
     'use_simple_naive_mode': bool_to_ini(USE_SIMPLE_NAIVE_MODE_DEFAULT),
     'case_sensitive': bool_to_ini(CASE_SENSITIVE_DEFAULT),
-    'id_regex': FIND_REGEX_DEFAULT,
-    'id_styles': STYLES_DEFAULT,
-    'id_styles_no': STYLES_NO_DEFAULT,
+    'identifier_regex': IDENTIFIER_REGEX_DEFAULT,
+    'identifier_style_include': IDENTIFIER_STYLE_INCLUDE_DEFAULT,
+    'identifier_style_exclude': IDENTIFIER_STYLE_EXCLUDE_DEFAULT,
 }
 
 class PluginConfig:
@@ -155,8 +143,6 @@ class SyncEditSession:
     Each file can have only one active session.
     """
     def __init__(self):
-        self.start = None
-        self.end = None
         self.selected = False 
         self.editing = False
         self.dictionary = {} # Stores mapping of { "word_string": [list_of_token_positions] }
@@ -164,14 +150,26 @@ class SyncEditSession:
         self.original = None # Original caret position before editing
         self.start_l = None  # Start line of selection
         self.end_l = None    # End line of selection
-        self.saved_sel = None
-        self.pattern = None
-        self.pattern_styles = None
-        self.pattern_styles_no = None
-        self.naive_mode = False
-        self.gutter_icon_line = None  # Line where gutter icon is displayed
+        self.gutter_icon_line = None     # Line where gutter icon is displayed
         self.gutter_icon_active = False  # Whether gutter icon is currently shown
-        self.offset = None
+
+        # Config ini
+        self.use_colors = USE_COLORS_DEFAULT
+        self.use_simple_naive_mode = USE_SIMPLE_NAIVE_MODE_DEFAULT
+        self.case_sensitive = CASE_SENSITIVE_DEFAULT
+        self.identifier_regex = IDENTIFIER_REGEX_DEFAULT
+        self.identifier_style_include = IDENTIFIER_STYLE_INCLUDE_DEFAULT
+        self.identifier_style_exclude = IDENTIFIER_STYLE_EXCLUDE_DEFAULT
+
+        # Compiled regex objects
+        self.regex_identifier = None
+        self.regex_style_include = None
+        self.regex_style_exclude = None
+
+        # Marker colors
+        self.marker_fg_color = None
+        self.marker_bg_color = None
+        self.marker_border_color = None
 
 
 class Command:
@@ -214,10 +212,6 @@ class Command:
         if handle in self.sessions:
             del self.sessions[handle]
 
-    def is_sync_active(self, ed_self):
-        """Check if sync edit is active using PROP_TAG (lightweight check)."""
-        return ed_self.get_prop(PROP_TAG, 'cuda_sync_editing:undefined') == 'active'
-
     def show_gutter_icon(self, ed_self, line_index, active=False):
         """Shows the gutter icon at the specified line."""
         # Remove any existing gutter icon
@@ -241,11 +235,30 @@ class Command:
             session.gutter_icon_line = None
             session.gutter_icon_active = False
 
+    def update_gutter_icon_on_selection(self, ed_self):
+        """
+        Called when selection changes. Shows gutter icon if there's a valid selection.
+        """
+        # Check if we have a selection
+        x0, y0, x1, y1 = ed_self.get_carets()[0]
+        if y1 >= 0 and (y0 != y1 or x0 != x1):  # Has selection
+            # Show icon at the last line of selection
+            last_line = max(y0, y1)
+            self.show_gutter_icon(ed_self, last_line)
+        else:
+            # No selection, hide icon if not in active sync edit mode
+            if self.has_session(ed_self):
+                session = self.get_session(ed_self)
+                if not session.selected and not session.editing:
+                    self.hide_gutter_icon(ed_self)
+            else:
+                self.hide_gutter_icon(ed_self)
+
     def token_style_ok(self, ed_self, s):
         """Checks if a token's style matches the allowed patterns (IDs) and rejects Keywords."""
         session = self.get_session(ed_self)
-        good = session.pattern_styles.fullmatch(s)
-        bad = session.pattern_styles_no.fullmatch(s)
+        good = session.regex_style_include.fullmatch(s)
+        bad = session.regex_style_exclude.fullmatch(s)
         return good and not bad
 
     def toggle(self, ed_self=None):
@@ -272,26 +285,16 @@ class Command:
         3. Groups identical words.
         4. Applies visual markers (colors).
         
-        All configuration is read fresh from file/theme on every start so do not need to restart.
+        All configuration is read fresh from file/theme on every start so the user do not need to restart.
         """
         session = self.get_session(ed_self)
         # now that we created a session we should always call update_gutter_icon_on_selection before start_sync_edit to set gutter_icon_line (set by show_gutter_icon) which will be used in start_sync_edit to set the red/active gutter icon
         self.update_gutter_icon_on_selection(ed_self)
         
         # --- Declare all globals that need fresh values ---
-        global USE_COLORS
-        global CASE_SENSITIVE
-        global FIND_REGEX
-        global STYLES
-        global STYLES_DEFAULT
-        global STYLES_NO
-        global STYLES_NO_DEFAULT
-        global MARKER_F_COLOR
-        global MARKER_BG_COLOR
-        global MARKER_BORDER_COLOR
         
         carets = ed_self.get_carets()
-        if len(carets)!=1:
+        if len(carets) != 1:
             self.reset(ed_self)
             msg_status(_('Sync Editing: Need single caret'))
             return
@@ -304,7 +307,7 @@ class Command:
         
         # --- 1. Selection Handling ---
         # Check if we have selection of text
-        if not original and session.saved_sel is None:
+        if not original:
             self.reset(ed_self)
             msg_status(_('Sync Editing: Make selection first'))
             return
@@ -312,65 +315,77 @@ class Command:
         self.set_progress(3)
         session.dictionary = {}
         
-        # If we are resuming a session or starting new
-        if session.saved_sel is not None:
-            session.start_l, session.end_l = session.saved_sel
-            session.selected = True
-        else:
-            # Save coordinates and "Lock" the selection
-            session.start_l, session.end_l = ed_self.get_sel_lines()
-            session.selected = True
-            # Save text selection
-            session.saved_sel = ed_self.get_sel_lines()
-            # Break text selection
-            ed_self.set_sel_rect(0,0,0,0) # Clear visual selection to show markers instead
-        # Mark text that was selected
+        # Save coordinates and "Lock" the selection
+        session.start_l, session.end_l = ed_self.get_sel_lines()
+        session.selected = True
+        
+        # Break text selection and clear visual selection to show markers instead
+        ed_self.set_sel_rect(0,0,0,0)
+        
         self.set_progress(5)
         
-        # Update gutter icon to show active state (change color to red)
+        # Update gutter icon to show active state (change color to active/red)
         if session.gutter_icon_line is not None:
             self.show_gutter_icon(ed_self, session.gutter_icon_line, active=True)
         
         # Mark the range properties for CudaText
         ed_self.set_prop(PROP_MARKED_RANGE, (session.start_l, session.end_l))
-        ed_self.set_prop(PROP_TAG, 'cuda_sync_editing:active') # Tag editor state as 'sync active'
 
 
         # --- 2. Lexer / Parser Configuration ---
-        # Go naive way if lexer id none or other text file
-        cur_lexer = ed_self.get_prop(PROP_LEXER_FILE)
-        
-        # Determine if we use specific lexer rules or "Naive" mode
-        if cur_lexer in NON_STANDART_LEXERS:
-            # If it if non-standart lexer, change it's behaviour
-            STYLES_DEFAULT = NON_STANDART_LEXERS[cur_lexer]
-        elif cur_lexer == '':
-            # If lexer is none, go very naive way
-            session.naive_mode = True
-        
         # Instantiate config to get fresh values from disk on every session
         ini_config = PluginConfig()
-        USE_SIMPLE_NAIVE_MODE = ini_config.get_lexer_bool(cur_lexer, 'use_simple_naive_mode', USE_SIMPLE_NAIVE_MODE_DEFAULT)
-
-        if cur_lexer in NAIVE_LEXERS or USE_SIMPLE_NAIVE_MODE:
-            session.naive_mode = True
         
-        # Load Lexer/Global Configs
-        USE_COLORS = ini_config.get_lexer_bool(cur_lexer, 'use_colors', USE_COLORS_DEFAULT)
-        CASE_SENSITIVE = ini_config.get_lexer_bool(cur_lexer, 'case_sensitive', CASE_SENSITIVE_DEFAULT)
-        FIND_REGEX = ini_config.get_lexer_str(cur_lexer, 'id_regex', FIND_REGEX_DEFAULT)
-        STYLES = ini_config.get_lexer_str(cur_lexer, 'id_styles', STYLES_DEFAULT)
-        STYLES_NO = ini_config.get_lexer_str(cur_lexer, 'id_styles_no', STYLES_NO_DEFAULT)
+        # Force naive way if lexer is none or lexer is one of the text file types
+        cur_lexer = ed_self.get_prop(PROP_LEXER_FILE)
+        session.use_simple_naive_mode = ini_config.get_lexer_bool(cur_lexer, 'use_simple_naive_mode', USE_SIMPLE_NAIVE_MODE_DEFAULT)
+        if cur_lexer == '':
+            # If lexer is none, use simple naive mode
+            session.use_simple_naive_mode = True
+        if cur_lexer in NAIVE_LEXERS or session.use_simple_naive_mode:
+            session.use_simple_naive_mode = True
+        
+        # Determine if we use specific lexer rules
+        if cur_lexer in NON_STANDART_LEXERS:
+            # If it is non-standard lexer, change it's behavior
+            local_styles_default = NON_STANDART_LEXERS[cur_lexer]
+        else:
+            local_styles_default = IDENTIFIER_STYLE_INCLUDE_DEFAULT
+        session.identifier_style_include = ini_config.get_lexer_str(cur_lexer, 'identifier_style_include', local_styles_default)
+
+        # Load Lexer/Global Configs into session
+        session.use_colors = ini_config.get_lexer_bool(cur_lexer, 'use_colors', USE_COLORS_DEFAULT)
+        session.case_sensitive = ini_config.get_lexer_bool(cur_lexer, 'case_sensitive', CASE_SENSITIVE_DEFAULT)
+        session.identifier_regex = ini_config.get_lexer_str(cur_lexer, 'identifier_regex', IDENTIFIER_REGEX_DEFAULT)
+        session.identifier_style_exclude = ini_config.get_lexer_str(cur_lexer, 'identifier_style_exclude', IDENTIFIER_STYLE_EXCLUDE_DEFAULT)
 
         # Set colors based on theme 'Id' and 'SectionBG4' styles
-        MARKER_F_COLOR = theme_color('Id', True)
-        MARKER_BG_COLOR = theme_color('SectionBG4', False)
-        MARKER_BORDER_COLOR = MARKER_F_COLOR
+        session.marker_fg_color = theme_color('Id', True)
+        session.marker_bg_color = theme_color('SectionBG4', False)
+        session.marker_border_color = session.marker_fg_color
         
-        # Compile regex
-        session.pattern = re.compile(FIND_REGEX)
-        session.pattern_styles = re.compile(STYLES)
-        session.pattern_styles_no = re.compile(STYLES_NO)
+        # Compile regex patterns with fallbacks
+        try:
+            session.regex_identifier = re.compile(session.identifier_regex)
+        except Exception:
+            msg_status(_('Sync Editing: Invalid identifier_regex config - using fallback'))
+            print(_('ERROR: Sync Editing: Invalid identifier_regex config - using fallback'))
+            session.regex_identifier = re.compile(IDENTIFIER_REGEX_DEFAULT)
+
+        try:
+            session.regex_style_include = re.compile(session.identifier_style_include)
+        except Exception:
+            msg_status(_('Sync Editing: Invalid identifier_style_include config - using fallback'))
+            print(_('ERROR: Sync Editing: Invalid identifier_style_include config - using fallback'))
+            session.regex_style_include = re.compile(local_styles_default)
+
+        try:
+            session.regex_style_exclude = re.compile(session.identifier_style_exclude)
+        except Exception:
+            msg_status(_('Sync Editing: Invalid identifier_style_exclude config - using fallback'))
+            print(_('ERROR: Sync Editing: Invalid identifier_style_exclude config - using fallback'))
+            session.regex_style_exclude = re.compile(IDENTIFIER_STYLE_EXCLUDE_DEFAULT)
+
         # Run lexer scan form start
         
         # self.set_progress(10) # do not use this here before ed.action(EDACTION_LEXER_SCAN. see bug: https://github.com/Alexey-T/CudaText/issues/6120 the bug happen only with this line. Alexey said: app_idle is the main reason, it is bad to insert it before some parsing action. Usually app_idle is needed after some action, to run the app message processing. Not before. Dont use it if not nessesary...
@@ -379,27 +394,25 @@ class Command:
         ed_self.action(EDACTION_LEXER_SCAN, session.start_l) #API 1.0.289
         self.set_progress(40)
         
-        # Find all occurences of regex
-        # Get all tokens in the selected range
+        # Find all occurences of regex, get all tokens in the selected range
         tokenlist = ed_self.get_token(TOKEN_LIST_SUB, session.start_l, session.end_l)
         # print("tokenlist",tokenlist)
         
         self.set_progress(45)
         
         # --- 3. Token Processing ---
-        if not tokenlist and not session.naive_mode:
+        if not tokenlist and not session.use_simple_naive_mode:
             self.reset(ed_self)
             msg_status(_('Sync Editing: No syntax tokens found in selection'))
             self.set_progress(-1)
             restore_caret()
             return
             
-        elif session.naive_mode:
-            # Naive filling
+        elif session.use_simple_naive_mode:
             # Naive Mode: Scan text purely by Regex, ignoring syntax context
             for y in range(session.start_l, session.end_l+1):
                 cur_line = ed_self.get_text_line(y)
-                for match in session.pattern.finditer(cur_line):
+                for match in session.regex_identifier.finditer(cur_line):
                     # Create pseudo-token structure
                     token = ((match.start(), y), (match.end(), y), match.group(), 'id')
                     if match.group() in session.dictionary:
@@ -412,7 +425,7 @@ class Command:
                 if not self.token_style_ok(ed_self, token['style']):
                     continue
                 idd = token['str'].strip()
-                if not CASE_SENSITIVE:
+                if not session.case_sensitive:
                     idd = idd.lower()
                 
                 # Structure: ((x1, y1), (x2, y2), string, style)
@@ -432,21 +445,6 @@ class Command:
         if len(session.dictionary) == 0:
             self.reset(ed_self)
             msg_status(_('Sync Editing: No editable identifiers found in selection'))
-            self.set_progress(-1)
-            restore_caret()
-            return
-                    
-        # TODO: this is a dead code:
-        # this condition can never evaluate to True in practice. The fix_tokens method (called just before this check) explicitly removes any dictionary entries where a word has fewer than 2 occurrences. this means that after fix_tokens runs:
-        # - If the dictionary ends up empty (e.g., because the only word had just 1 occurrence and got removed), the preceding if len(sess['dictionary']) == 0 block handles it.
-        # - If the dictionary has entries, each must have at least 2 occurrences (otherwise they'd be removed).
-        # Therefore it is impossible to reach a state where there's exactly 1 unique word and it has exactly 1 occurrence—the removal logic prevents this. The elif is effectively dead code and could be removed without changing behavior.
-        # why the previos author add it? anyway it does not heart so i will leave it as is for now
-
-        # Issue #44: If only 1 instance of a word exists, there is nothing to sync-edit so we exit
-        elif len(session.dictionary) == 1 and len(session.dictionary[list(session.dictionary.keys())[0]]) == 1:
-            self.reset(ed_self)
-            msg_status(_('Sync Editing: Aborted. The found identifier appears only once in the selection.'))
             self.set_progress(-1)
             restore_caret()
             return
@@ -517,10 +515,10 @@ class Command:
         Used during initialization and when returning to selection mode after an edit.
         """
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
-        if not USE_COLORS:
+        session = self.get_session(ed_self)
+        if not session.use_colors:
             return
         rand_color = randomcolor.RandomColor()
-        session = self.get_session(ed_self)
         for key in session.dictionary:
             # Generate unique color for every unique word
             color  = html_color_to_int(rand_color.generate(luminosity='light')[0])
@@ -530,7 +528,7 @@ class Command:
                     x = key_tuple[0][0],
                     y = key_tuple[0][1],
                     len = key_tuple[1][0] - key_tuple[0][0],
-                    color_font = 0xb000000,
+                    color_font = 0xb000000, # this color is better than marker_fg_color especially with black themes because we use colored background
                     color_bg = color,
                     color_border = 0xb000000,
                     border_down = 1
@@ -584,8 +582,8 @@ class Command:
                 continue
 
             # Allow caret to stay considered "inside" while the token is being grown
-            if session.pattern:
-                match = session.pattern.match(current_line[start_x:]) if start_x <= len(current_line) else None
+            if session.regex_identifier:
+                match = session.regex_identifier.match(current_line[start_x:]) if start_x <= len(current_line) else None
                 if match:
                     dynamic_end = start_x + len(match.group(0))
                     if x0 <= dynamic_end:
@@ -613,7 +611,6 @@ class Command:
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
         ed_self.set_prop(PROP_MARKED_RANGE, (-1, -1))
         self.set_progress(-1)
-        ed_self.set_prop(PROP_TAG, 'cuda_sync_editing:inactive') # Tag editor state as 'sync inactive'
         
         # Hide gutter icon
         self.hide_gutter_icon(ed_self)
@@ -621,17 +618,17 @@ class Command:
         # Remove the session
         self.remove_session(ed_self)
         
-        msg_status(_('Sync Editing: Cancelled'))
+        msg_status(_('Sync Editing: Deactivated'))
 
     def doclick(self, ed_self=None):
-        """API Hook for Mouse Click events."""
+        """command 'Emulate mouse click' for people who don't like mouse."""
         if ed_self is None:
             ed_self = ed
         # state = app_proc(PROC_GET_KEYSTATE, '')
         state = ''
         return self.on_click(ed_self, state)
 
-    def on_click(self, ed_self, state):
+    def on_click(self, ed_self, _state):
         """
         Handles mouse clicks to toggle between 'Viewing' and 'Editing'.
         Logic:
@@ -641,8 +638,7 @@ class Command:
            - No: Do nothing (Do not exit).
         """
         # OPTIMIZATION: exit early if sync edit mode is not active
-        # if not ed_self.get_prop(PROP_TAG, 'cuda_sync_editing:undefined') == 'active':
-        if not self.is_sync_active(ed_self):
+        if not self.has_session(ed_self):
             return
         
         session = self.get_session(ed_self)
@@ -673,7 +669,10 @@ class Command:
                 and caret[0] >= key_tuple[0][0]:
                     clicked_key = key
                     offset = caret[0] - key_tuple[0][0]
-                    
+                    break
+            if clicked_key:
+                break
+        
         # If click was NOT on a valid word
         # Not editing - in selection mode
         if not clicked_key:
@@ -684,7 +683,6 @@ class Command:
         # Clear passive markers
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
         session.our_key = clicked_key
-        session.offset = offset
         session.original = (caret[0], caret[1])
         
         # Add active carets and borders
@@ -692,28 +690,21 @@ class Command:
             ed_self.attr(MARKERS_ADD, tag = MARKER_CODE, \
             x = key_tuple[0][0], y = key_tuple[0][1], \
             len = key_tuple[1][0] - key_tuple[0][0], \
-            color_font=MARKER_F_COLOR, \
-            color_bg=MARKER_BG_COLOR, \
-            color_border=MARKER_BORDER_COLOR, \
+            color_font=session.marker_fg_color, \
+            color_bg=session.marker_bg_color, \
+            color_border=session.marker_border_color, \
             border_left=1, \
             border_right=1, \
             border_down=1, \
             border_up=1 \
             )
-            ed_self.set_caret(key_tuple[0][0] + session.offset, key_tuple[0][1], id=CARET_ADD)
+            ed_self.set_caret(key_tuple[0][0] + offset, key_tuple[0][1], id=CARET_ADD)
         
         # Update state
         session.selected = False
         session.editing = True
-        
-        # Track bounds
-        first_caret = ed_self.get_carets()[0]
-        session.start = first_caret[1]
-        session.end = first_caret[3]
-        if session.start > session.end and not session.end == -1:
-            session.start, session.end = session.end, session.start
 
-    def on_click_gutter(self, ed_self, state, nline, nband):
+    def on_click_gutter(self, ed_self, _state, nline, _nband):
         """
         Handles clicks on the gutter area.
         If user clicks on the sync edit icon, toggle the sync editing mode.
@@ -738,25 +729,6 @@ class Command:
         # Not our decoration, allow default processing
         return None
 
-    def update_gutter_icon_on_selection(self, ed_self):
-        """
-        Called when selection changes. Shows gutter icon if there's a valid selection.
-        """
-        # Check if we have a selection
-        x0, y0, x1, y1 = ed_self.get_carets()[0]
-        if y1 >= 0 and (y0 != y1 or x0 != x1):  # Has selection
-            # Show icon at the last line of selection
-            last_line = max(y0, y1)
-            self.show_gutter_icon(ed_self, last_line)
-        else:
-            # No selection, hide icon if not in active sync edit mode
-            if self.has_session(ed_self):
-                session = self.get_session(ed_self)
-                if not session.selected and not session.editing:
-                    self.hide_gutter_icon(ed_self)
-            else:
-                self.hide_gutter_icon(ed_self)
-
     def on_caret(self, ed_self):
     # on_caret_slow is better because it will consume less resources but it breaks the colors recalculations when user edit an ID, so stick with on_caret
         """
@@ -769,10 +741,7 @@ class Command:
         Also handles showing/hiding gutter icon based on selection.
         """
         # OPTIMIZATION: exit early if sync edit mode is not active
-        # TODO: which one is faster
         if not self.has_session(ed_self):
-        # if not self.is_sync_active(ed_self):
-        # if not ed_self.get_prop(PROP_TAG, 'cuda_sync_editing:undefined') == 'active':
             # Only show/hide gutter icon when NOT in sync edit mode
             self.update_gutter_icon_on_selection(ed_self)
             return
@@ -808,17 +777,18 @@ class Command:
                 else:
                     self.finish_editing(ed_self)
                 return
+            # NOTE: self.redraw(ed_self) is called here to update word markers live during typing.
+            # This is a performance hit on simple caret moves (arrow keys) but necessary for live updates.
             self.redraw(ed_self)
 
-    def on_key(self, ed_self, key, state):
+    def on_key(self, ed_self, key, _state):
         """
         Handles Esc Keyboard input to cancel sync editing.
         Strict Exit Logic:
         Only VK_ESCAPE triggers the full 'reset' (Exit).
         """
         # OPTIMIZATION: exit early if sync edit mode is not active
-        # if not ed_self.get_prop(PROP_TAG, 'cuda_sync_editing:undefined') == 'active':
-        if not self.is_sync_active(ed_self):
+        if not self.has_session(ed_self):
             return
             
         if key == VK_ESCAPE:
@@ -855,9 +825,13 @@ class Command:
         
         # Backtrack to find start of the word
         # Workaround for end of id case
-        if not session.pattern.match(first_y_line[start_pos:]):
+        # If the caret is at the end of a word (e.g. index after the last char),
+        # move back one step to ensure the regex match succeeds.
+        if not session.regex_identifier.match(first_y_line[start_pos:]):
             start_pos -= 1
-        while session.pattern.match(first_y_line[start_pos:]):
+        
+        # This loop moves start_pos to the position *before* the start of the word
+        while session.regex_identifier.match(first_y_line[start_pos:]):
             start_pos -= 1
         start_pos += 1
         # Workaround for EOL #65
@@ -866,13 +840,13 @@ class Command:
         
         # Check if word became empty (deleted)
         # Workaround for empty id (eg. when it was deleted) #62
-        if not session.pattern.match(first_y_line[start_pos:]):
+        if not session.regex_identifier.match(first_y_line[start_pos:]):
             session.our_key = old_key
             ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
             return
             
-        new_key = session.pattern.match(first_y_line[start_pos:]).group(0)
-        if not CASE_SENSITIVE:
+        new_key = session.regex_identifier.match(first_y_line[start_pos:]).group(0)
+        if not session.case_sensitive:
             new_key = new_key.lower()
         
         # Calculate the length change
@@ -898,7 +872,7 @@ class Command:
             y = pointer[1]
             y_line = ed_self.get_text_line(y)
             # Scan backwards to find start of the new word instance
-            while session.pattern.match(y_line[x:]):
+            while session.regex_identifier.match(y_line[x:]):
                 x -= 1
             x += 1
             # Workaround for EOL #65
@@ -961,9 +935,9 @@ class Command:
                 ed_self.attr(MARKERS_ADD, tag = MARKER_CODE, \
                 x = key_tuple[0][0], y = key_tuple[0][1], \
                 len = key_tuple[1][0] - key_tuple[0][0], \
-                color_font=MARKER_F_COLOR, \
-                color_bg=MARKER_BG_COLOR, \
-                color_border=MARKER_BORDER_COLOR, \
+                color_font=session.marker_fg_color, \
+                color_bg=session.marker_bg_color, \
+                color_border=session.marker_border_color, \
                 border_left=1, \
                 border_right=1, \
                 border_down=1, \
