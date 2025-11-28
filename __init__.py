@@ -35,6 +35,8 @@ DECOR_TAG = app_proc(PROC_GET_UNIQUE_TAG, '')  # Unique tag for gutter decoratio
 # --- Default Configuration ---
 CASE_SENSITIVE = True
 FIND_REGEX_DEFAULT = r'\w+'
+# FIND_REGEX_DEFAULT = r'\b\w+\b'
+
 FIND_REGEX = FIND_REGEX_DEFAULT
 
 # Regex to identify valid tokens (identifiers) vs invalid ones
@@ -510,8 +512,24 @@ class Command:
         if not carets:
             return False
         x0, y0, x1, y1 = carets[0]
+        current_line = ed_self.get_text_line(y0)
         for key_tuple in session.dictionary.get(session.our_key, []):
-            if y0 == key_tuple[0][1] and key_tuple[0][0] <= x0 <= key_tuple[1][0]:
+            start_pos, end_pos = key_tuple[0], key_tuple[1]
+            if y0 != start_pos[1]:
+                continue
+            start_x = start_pos[0]
+            if x0 < start_x:
+                continue
+
+            # Allow caret to stay considered "inside" while the token is being grown
+            if session.pattern:
+                match = session.pattern.match(current_line[start_x:]) if start_x <= len(current_line) else None
+                if match:
+                    dynamic_end = start_x + len(match.group(0))
+                    if x0 <= dynamic_end:
+                        return True
+
+            if x0 <= end_pos[0]:
                 return True
         return False
 
