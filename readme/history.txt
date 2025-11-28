@@ -1,3 +1,10 @@
+2025.11.28 (patches by @badrelmers. Major Refactoring)
++ add: Continuous Edit mode (click a new word to switch editing immediately).
++ add: Multisession files edit support (you can enable the plugin now on multiple files at the same time).
++ add: Gutter Icon activation/deactivation for improved workflow.
++ change: Optimized the core code for speed and performance.
+* change: Unified configuration into a single INI file: `settings/cuda_sync_editing.ini`.
+- Removed the old configuration system (which used `user.json` and `lexer_*.json` files).
 
 2021.12.19
 + add: command 'Emulate mouse click' for ppl who don't like mouse (by Alexey T.)
