@@ -228,8 +228,8 @@ class Command:
         """Load the gutter icon images into CudaText's imagelist."""
         if ed_self.get_prop(PROP_TAG, 'sync_ed_icons:0') == '0':
             # print('Sync Editing: Loading icons:', ed_self.get_filename())
-            _h_im = ed_self.decor(DECOR_GET_IMAGELIST)
             ed_self.set_prop(PROP_TAG, 'sync_ed_icons:1')
+            _h_im = ed_self.decor(DECOR_GET_IMAGELIST)
             self.icon_inactive = imagelist_proc(_h_im, IMAGELIST_ADD, value=ICON_INACTIVE_PATH)
             self.icon_active = imagelist_proc(_h_im, IMAGELIST_ADD, value=ICON_ACTIVE_PATH)
         '''
