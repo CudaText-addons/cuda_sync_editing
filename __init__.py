@@ -431,8 +431,22 @@ class Command:
         self.set_progress(40)
 
         # Find all occurences of regex, get all tokens in the selected range
-        tokenlist = ed_self.get_token(TOKEN_LIST_SUB, session.start_l, session.end_l)
+        tokenlist = ed_self.get_token(TOKEN_LIST_SUB, session.start_l, session.end_l) or []
         # print("tokenlist",tokenlist)
+
+        x1, y1, x2, y2 = caret
+        # Sort coords of caret
+        if (y1, x1) > (y2, x2):
+            x1, y1, x2, y2 = x2, y2, x1, y1
+
+        def token_ok(t):
+            if t['y1'] == session.start_l and t['x1'] < x1:
+                return False
+            if t['y2'] == session.end_l and t['x2'] > x2:
+                return False
+            return True
+        # Drop tokens out of selection
+        tokenlist = [t for t in tokenlist if token_ok(t)]
 
         self.set_progress(45)
 
@@ -449,6 +463,11 @@ class Command:
             for y in range(session.start_l, session.end_l+1):
                 cur_line = ed_self.get_text_line(y)
                 for match in session.regex_identifier.finditer(cur_line):
+                    # Drop tokens out of selection
+                    if y == session.start_l and match.start() < x1:
+                        continue
+                    if y == session.end_l and match.end() > x2:
+                        continue
                     # Create pseudo-token structure: ((x1, y1), (x2, y2), string, style)
                     token = ((match.start(), y), (match.end(), y), match.group(), 'id')
                     if match.group() in session.dictionary:
