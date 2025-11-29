@@ -63,6 +63,9 @@ NAIVE_LEXERS = [
 MARKER_CODE = app_proc(PROC_GET_UNIQUE_TAG, '') # Generate a unique integer tag for this plugin's markers to avoid conflicts with other plugins
 DECOR_TAG = app_proc(PROC_GET_UNIQUE_TAG, '')  # Unique tag for gutter decorations
 
+ICON_INACTIVE_PATH = os.path.join(os.path.dirname(__file__), 'sync_off.png')
+ICON_ACTIVE_PATH = os.path.join(os.path.dirname(__file__), 'sync_on.png')
+
 
 def bool_to_ini(value):
     return 'true' if value else 'false'
@@ -194,7 +197,6 @@ class Command:
         # Load gutter icons into imagelist
         self.icon_inactive = -1
         self.icon_active = -1
-        self._load_gutter_icons()
 
     def get_editor_handle(self, ed_self):
         """Returns a unique identifier for the editor."""
@@ -222,20 +224,20 @@ class Command:
         if handle in self.sessions:
             del self.sessions[handle]
 
-    def _load_gutter_icons(self):
+    def load_gutter_icons(self, ed_self):
         """Load the gutter icon images into CudaText's imagelist."""
-        try:
-            icon_inactive_path = os.path.join(os.path.dirname(__file__), 'sync_off.png')
-            icon_active_path = os.path.join(os.path.dirname(__file__), 'sync_on.png')
-            
-            # Load images into imagelist (returns index)
-            _h_im = ed.decor(DECOR_GET_IMAGELIST)
-            self.icon_inactive = imagelist_proc(_h_im, IMAGELIST_ADD, value=icon_inactive_path)
-            self.icon_active = imagelist_proc(_h_im, IMAGELIST_ADD, value=icon_active_path)
+        if ed_self.get_prop(PROP_TAG, 'sync_ed_icons:0') == '0':
+            # print('Sync Editing: Loading icons:', ed_self.get_filename())
+            _h_im = ed_self.decor(DECOR_GET_IMAGELIST)
+            ed_self.set_prop(PROP_TAG, 'sync_ed_icons:1')
+            self.icon_inactive = imagelist_proc(_h_im, IMAGELIST_ADD, value=ICON_INACTIVE_PATH)
+            self.icon_active = imagelist_proc(_h_im, IMAGELIST_ADD, value=ICON_ACTIVE_PATH)
+        '''
         except Exception as ex:
             print(f'ERROR: Sync Editing: Failed to load gutter icons: {ex}')
             self.icon_inactive = -1
             self.icon_active = -1
+        '''
 
     def show_gutter_icon(self, ed_self, line_index, active=False):
         """Shows the gutter icon at the specified line."""
@@ -265,6 +267,8 @@ class Command:
         Called when selection changes (via on_caret). 
         Shows gutter icon if there's a valid selection, hides it otherwise.
         """
+        self.load_gutter_icons(ed_self)
+
         # Check if we have a selection
         x0, y0, x1, y1 = ed_self.get_carets()[0]
         if y1 >= 0 and (y0 != y1 or x0 != x1):  # Has selection
