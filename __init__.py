@@ -64,6 +64,7 @@ NAIVE_LEXERS = [
 
 MARKER_CODE = app_proc(PROC_GET_UNIQUE_TAG, '') # Generate a unique integer tag for this plugin's markers to avoid conflicts with other plugins
 DECOR_TAG = app_proc(PROC_GET_UNIQUE_TAG, '')  # Unique tag for gutter decorations
+TOOLTIP_TEXT = _('Sync Editing: click to toggle')
 
 
 def bool_to_ini(value):
@@ -247,7 +248,7 @@ class Command:
         # Choose icon based on active state
         icon_index = self.icon_active if active else self.icon_inactive
 
-        ed_self.decor(DECOR_SET, line=line_index, tag=DECOR_TAG, text='', image=icon_index, auto_del=False)
+        ed_self.decor(DECOR_SET, line=line_index, tag=DECOR_TAG, text=''+chr(1)+TOOLTIP_TEXT, image=icon_index, auto_del=False)
 
         if self.has_session(ed_self):
             session = self.get_session(ed_self)
