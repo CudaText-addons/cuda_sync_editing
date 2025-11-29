@@ -8,7 +8,7 @@ Sync Editing feature to edit identical identifiers (inspired by [SynWrite](http:
 1. Select a block of text (one or multiple lines) containing the identifiers you want to edit.
 
 2. Activation:
-   - A "hamburger" icon (≡) will appear in the Gutter (left margin) on the last line of your selection.
+   - An icon will appear in the Gutter (left margin) on the last line of your selection.
    - Click this Gutter Icon to enter en Editing mode. Or use the menu: Plugins / Sync Editing / Activate.
 
 3. Editing:
