@@ -23,7 +23,7 @@ Basic usage
    - If you move the caret away from an active word, the plugin returns to "Selection State" (markers remain visible).
 
 5. Finish:
-   - Click the Gutter Icon again or press 'Esc' key to exit the plugin completely.
+   - Click the Gutter Icon again or press Esc-key to exit the sync-editing completely.
 
 
 Configuration file
