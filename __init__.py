@@ -192,6 +192,7 @@ class Command:
         """Initializes plugin state."""
         # Dictionary to store sessions: {editor_handle: SyncEditSession}
         self.sessions = {}
+        self.inited_icon_eds = set()
         self.icon_inactive = -1
         self.icon_active = -1
 
@@ -223,18 +224,19 @@ class Command:
 
     def load_gutter_icons(self, ed_self):
         """Load the gutter icon images into CudaText's imagelist."""
-        if ed_self.get_prop(PROP_TAG, 'sync_ed_icons:0') == '0':
+        _h_ed = self.get_editor_handle(ed_self)
+        if _h_ed not in self.inited_icon_eds:
             # print('Sync Editing: Loading icons:', ed_self.get_filename())
-            ed_self.set_prop(PROP_TAG, 'sync_ed_icons:1')
+            self.inited_icon_eds.add(_h_ed)
             _h_im = ed_self.decor(DECOR_GET_IMAGELIST)
             self.icon_inactive = imagelist_proc(_h_im, IMAGELIST_ADD, value=ICON_INACTIVE_PATH)
             self.icon_active = imagelist_proc(_h_im, IMAGELIST_ADD, value=ICON_ACTIVE_PATH)
-        '''
-        except Exception as ex:
-            print(f'ERROR: Sync Editing: Failed to load gutter icons: {ex}')
-            self.icon_inactive = -1
-            self.icon_active = -1
-        '''
+
+    def on_close(self, ed_self):
+        handle = self.get_editor_handle(ed_self)
+        if handle in self.inited_icon_eds:
+            self.inited_icon_eds.remove(handle)
+            # print('Sync Editing: Forget handle')
 
     def show_gutter_icon(self, ed_self, line_index, active=False):
         """Shows the gutter icon at the specified line."""
