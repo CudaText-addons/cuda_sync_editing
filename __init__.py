@@ -558,6 +558,12 @@ class Command:
         # Remove the "Active Editing" markers (borders)
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
         
+        # Reset carets to single caret (keep first caret position)
+        carets = ed_self.get_carets()
+        if carets:
+            first_caret = carets[0]
+            ed_self.set_caret(first_caret[0], first_caret[1], id=CARET_SET_ONE)
+        
         # Reset flags to 'Selection' mode
         session.original = None
         session.editing = False
