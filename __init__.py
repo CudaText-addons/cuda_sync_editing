@@ -438,15 +438,11 @@ class Command:
         # Sort coords of caret
         if (y1, x1) > (y2, x2):
             x1, y1, x2, y2 = x2, y2, x1, y1
-
-        def token_ok(t):
-            if t['y1'] == session.start_l and t['x1'] < x1:
-                return False
-            if t['y2'] == session.end_l and t['x2'] > x2:
-                return False
-            return True
         # Drop tokens out of selection
-        tokenlist = [t for t in tokenlist if token_ok(t)]
+        tokenlist = [t for t in tokenlist if \
+            not (t['y1'] == session.start_l and t['x1'] < x1) and \
+            not (t['y2'] == session.end_l and t['x2'] > x2) \
+            ]
 
         self.set_progress(45)
 
