@@ -92,7 +92,7 @@ NOTE: These two settings are IGNORED if `use_simple_naive_mode` is set to true.
 
 --- Mode 2: Simple Naive Mode (Regex Only) ---
 
-This mode can be enabled by setting "use_simple_naive_mode" to true
+This mode can be enabled by setting "use_simple_naive_mode" to true.
 
 Naive Mode disables the syntax checks and finds words purely by matching a Regex pattern. This is useful for plain text files, configuration files, or lexers where styling is not specific enough. When using "Naive Mode," this plugin ignores CudaText syntax highlighting and simply grabs every word that matches a pattern, this will allow editing any duplicates even those inside comments and strings.
 
@@ -146,7 +146,7 @@ To configure "identifier_style_include" correctly, you need to know what CudaTex
 Notes
 -----
 - The plugin automatically uses "Simple Naive Mode" (Regex only) for: Markdown, reStructuredText, Textile, ToDo, Todo.txt, JSON and Ini files.
-- Identifiers inside Comments or Strings are usually ignored unless `use_simple_naive_mode` is set to true.
+- Identifiers inside 'Comments' or 'Strings' are usually ignored unless `use_simple_naive_mode` is set to true.
 
 
 Troubleshooting
