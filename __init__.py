@@ -751,22 +751,18 @@ class Command:
         # Check if there's a decoration on this line with our tag
         decorations = ed_self.decor(DECOR_GET_ALL, nline)
 
-        if decorations:
-            for decor in decorations:
-                if decor.get('tag') == DECOR_TAG:
-                    # User clicked on our sync edit icon
-                    session = self.get_session(ed_self)
+        for decor in decorations:
+            if decor['tag'] == DECOR_TAG:
+                # User clicked on our sync edit icon
+                session = self.get_session(ed_self)
 
-                    if session.selected or session.editing:
-                        # If already in sync edit mode, exit
-                        self.reset(ed_self)
-                    else:
-                        # Otherwise, start sync editing
-                        self.start_sync_edit(ed_self)
-                    return False  # Prevent default processing
-
-        # Not our decoration, allow default processing
-        return None
+                if session.selected or session.editing:
+                    # If already in sync edit mode, exit
+                    self.reset(ed_self)
+                else:
+                    # Otherwise, start sync editing
+                    self.start_sync_edit(ed_self)
+                return False  # Prevent default processing
 
     def on_caret(self, ed_self):
     # on_caret_slow is better because it will consume less resources but it breaks the colors recalculations when user edit an ID, so stick with on_caret
