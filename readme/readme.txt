@@ -26,14 +26,15 @@ Basic usage
    - Click the Gutter Icon again or press 'Esc' key to exit the plugin completely.
 
 
-Configuration
--------------
+Configuration file
+------------------
 
 The plugin creates a configuration file at `settings/cuda_sync_editing.ini`. It will be created automatically upon the first run.
 
-Global settings must be placed in the [global] section and will apply to all files. You can override settings for specific lexers using [lexer_LexerName] sections.
+Global settings must be placed in the [global] section and will apply to all files. You can override settings for specific lexers using [lexer_LexerName] sections. Boolean values can be written not only like 0/1, but also like
+false/true, off/on, no/yes; in any casing.
 
-Supported Options:
+Supported options:
 
   - use_colors (true/false)
     - Default: true
