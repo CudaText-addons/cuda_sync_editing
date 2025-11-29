@@ -8,7 +8,7 @@ Basic Usage
 1. Select a block of text (one or multiple lines) containing the identifiers you want to edit.
 
 2. Activation:
-   - A "hamburger" icon (≡) will appear in the Gutter (left margin) on the last line of your selection.
+   - An icon will appear in the Gutter (left margin) on the last line of your selection.
    - Click this Gutter Icon to enter en Editing mode. Or use the menu: Plugins / Sync Editing / Activate.
 
 3. Editing:
@@ -156,7 +156,7 @@ About
 -----
 
 Authors:
-  - Vladislav Utkin (https://github.com/viad00) - Author
-  - Alexey Torgashin (CudaText) - Made some bug fixes and other improvments
+  - Vladislav Utkin (https://github.com/viad00) - Author.
+  - Alexey Torgashin (CudaText) - Made some bug fixes and other improvements.
   - Badr Elmers (https://github.com/badrelmers) - Made a big refactoring by adding: Continous Edit mode, Multisession files edit, gutter activation and optimized the code for speed.
 License: MIT

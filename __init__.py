@@ -155,7 +155,7 @@ class SyncEditSession:
         self.start_l = None  # Start line of selection
         self.end_l = None    # End line of selection
         self.gutter_icon_line = None     # Line where gutter icon is displayed
-        self.gutter_icon_active = False  # Whether gutter icon is currently shown/red
+        self.gutter_icon_active = False  # Whether gutter icon is currently shown as active
 
         # Config ini
         self.use_colors = USE_COLORS_DEFAULT
@@ -189,6 +189,11 @@ class Command:
         """Initializes plugin state."""
         # Dictionary to store sessions: {editor_handle: SyncEditSession}
         self.sessions = {}
+        
+        # Load gutter icons into imagelist
+        self.icon_inactive = -1
+        self.icon_active = -1
+        self._load_gutter_icons()
 
     def get_editor_handle(self, ed_self):
         """Returns a unique identifier for the editor."""
@@ -216,17 +221,30 @@ class Command:
         if handle in self.sessions:
             del self.sessions[handle]
 
+    def _load_gutter_icons(self):
+        """Load the gutter icon images into CudaText's imagelist."""
+        try:
+            icon_inactive_path = os.path.join(os.path.dirname(__file__), 'sync_off.png')
+            icon_active_path = os.path.join(os.path.dirname(__file__), 'sync_on.png')
+            
+            # Load images into imagelist (returns index)
+            _h_im = ed.decor(DECOR_GET_IMAGELIST)
+            self.icon_inactive = imagelist_proc(_h_im, IMAGELIST_ADD, value=icon_inactive_path)
+            self.icon_active = imagelist_proc(_h_im, IMAGELIST_ADD, value=icon_active_path)
+        except Exception as ex:
+            print(f'ERROR: Sync Editing: Failed to load gutter icons: {ex}')
+            self.icon_inactive = -1
+            self.icon_active = -1
+
     def show_gutter_icon(self, ed_self, line_index, active=False):
         """Shows the gutter icon at the specified line."""
         # Remove any existing gutter icon first
         self.hide_gutter_icon(ed_self)
         
-        # Choose color based on active state
-        # 0x00AA00 (Green) = Available / Selection Mode
-        # 0x0000AA (Red)   = Active / Editing Mode
-        color = 0x0000AA if active else 0x00AA00
+        # Choose icon based on active state
+        icon_index = self.icon_active if active else self.icon_inactive
         
-        ed_self.decor(DECOR_SET, line=line_index, tag=DECOR_TAG, text="≡", color=color, bold=True, italic=False, image=-1, auto_del=False)
+        ed_self.decor(DECOR_SET, line=line_index, tag=DECOR_TAG, text='', image=icon_index, auto_del=False)
         
         if self.has_session(ed_self):
             session = self.get_session(ed_self)
@@ -296,8 +314,8 @@ class Command:
         All configuration is read fresh from file/theme on every start so the user does not need to restart CudaText.
         """
         session = self.get_session(ed_self)
-        # now that we created a session we should always call update_gutter_icon_on_selection before start_sync_edit to set gutter_icon_line (set by show_gutter_icon) which will be used in start_sync_edit to set the red/active gutter icon
-        # Update gutter icon before starting to ensure session.gutter_icon_line is set. This allows us to flip it to "Active" (red) mode shortly after.
+        # now that we created a session we should always call update_gutter_icon_on_selection before start_sync_edit to set gutter_icon_line (set by show_gutter_icon) which will be used in start_sync_edit to set the active gutter icon
+        # Update gutter icon before starting to ensure session.gutter_icon_line is set. This allows us to flip it to "Active" mode shortly after.
         self.update_gutter_icon_on_selection(ed_self)
         
         carets = ed_self.get_carets()
@@ -331,7 +349,7 @@ class Command:
         
         self.set_progress(5)
         
-        # Update gutter icon to show active state (change color to active/red)
+        # Update gutter icon to show active state
         if session.gutter_icon_line is not None:
             self.show_gutter_icon(ed_self, session.gutter_icon_line, active=True)
         
@@ -557,6 +575,12 @@ class Command:
             
         # Remove the "Active Editing" markers (borders)
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
+        
+        # Reset carets to single caret (keep first caret position)
+        carets = ed_self.get_carets()
+        if carets:
+            first_caret = carets[0]
+            ed_self.set_caret(first_caret[0], first_caret[1], id=CARET_SET_ONE)
         
         # Reset flags to 'Selection' mode
         session.original = None
