@@ -270,8 +270,13 @@ class Command:
         """
         self.load_gutter_icons(ed_self)
 
+        carets = ed_self.get_carets()
+        if len(carets) != 1: # Don't support multi-carets
+            self.hide_gutter_icon(ed_self)
+            return
+
         # Check if we have a selection
-        x0, y0, x1, y1 = ed_self.get_carets()[0]
+        x0, y0, x1, y1 = carets[0]
         if y1 >= 0 and (y0 != y1 or x0 != x1):  # Has selection
             # Show icon at the last line of selection
             last_line = max(y0, y1)
