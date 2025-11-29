@@ -31,20 +31,21 @@ Configuration file
 
 The plugin creates a configuration file at `settings/cuda_sync_editing.ini`. It will be created automatically upon the first run.
 
-Global settings must be placed in the [global] section and will apply to all files. You can override settings for specific lexers using [lexer_LexerName] sections. Boolean values can be written not only like 0/1, but also like
-false/true, off/on, no/yes; in any casing.
+Global settings must be placed in the [global] section and will apply to all files. You can override settings for specific lexers using [lexer_LexerName] sections.
+
+Boolean values can be written not only like 0/1, but also like false/true, off/on, no/yes; value can be in any casing.
 
 Supported options:
 
-  - use_colors (true/false)
+  - use_colors (boolean)
     - Default: true
     - Visualizes identifiers with background colors. If true, assigns a unique background color to every distinct word found in the selection.
 
-  - case_sensitive (true/false)
+  - case_sensitive (boolean)
     - Default: true
     - If true, "Var" and "var" are treated as different words.
 
-  - use_simple_naive_mode (true/false)
+  - use_simple_naive_mode (boolean)
     - Default: false
     - If true, ignores syntax highlighting roles and detects words purely by RegEx.
     - Useful for plain text files or lexers where styles are not standard.
