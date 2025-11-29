@@ -2,7 +2,8 @@ Plugin for CudaText.
 
 This plugin allows you to easly edit multiple occurrences of the same word simultaneously within a selected block of text, inspired by SynWrite editor.
 
-Basic Usage
+
+Basic usage
 -----------
 
 1. Select a block of text (one or multiple lines) containing the identifiers you want to edit.
@@ -25,12 +26,12 @@ Basic Usage
    - Click the Gutter Icon again or press 'Esc' key to exit the plugin completely.
 
 
-Configuration:
---------------
+Configuration
+-------------
 
 The plugin creates a configuration file at `settings/cuda_sync_editing.ini`. It will be created automatically upon the first run.
 
-Global settings must be placed in the [global] section and will apply to all files. You can override settings for specific lexers using [lexer_Name] sections.
+Global settings must be placed in the [global] section and will apply to all files. You can override settings for specific lexers using [lexer_LexerName] sections.
 
 Supported Options:
 
@@ -61,8 +62,8 @@ Supported Options:
     - Regex to match Lexer Styles that should be IGNORED (e.g., "Id keyword").
 
 
-Configuration (Advanced)
-------------------------
+Configuration, advanced
+-----------------------
 
 You can customize the plugin for specific programming languages by creating sections named after the lexer, such as [lexer_Bash script], [lexer_PHP] or [lexer_HTML].
 
@@ -80,7 +81,7 @@ Relevant Settings for Standard Lexer Mode:
 * identifier_style_include
   - A Regex pattern matching CudaText style names to ALLOW (e.g., "Id", "Var").
   - Example: `(?i)id[\w\s]*` (Matches styles like "Id", "Id keyword", "Id function" ...etc).
-    
+
 * identifier_style_exclude
   - A Regex pattern matching CudaText style names to IGNORE (e.g., "Id keyword").
   - Example: `(?i).*keyword.*` (Prevents editing keywords like "function", "if", "class" ...etc).
@@ -101,8 +102,8 @@ Relevant Settings for Naive Mode:
   NOTE: This setting is primarily used when use_simple_naive_mode is true, though the regex still defines valid word characters during editing in all modes, so in Standard mode, this setting is still used to define word boundaries while typing.
 
 
-Configuration Examples:
------------------------
+Configuration examples
+----------------------
 
 Example cuda_sync_editing.ini content:
 
@@ -130,8 +131,8 @@ identifier_style_include=Text|Tag id correct|Tag prop
 identifier_style_include=Var
 
 
-How to find Style Names?
-------------------------
+How to find Style Names
+-----------------------
 
 To configure "identifier_style_include" correctly, you need to know what CudaText calls the specific parts of your code.
 1. Open a file with the desired syntax.
@@ -139,8 +140,9 @@ To configure "identifier_style_include" correctly, you need to know what CudaTex
 3. Look at the list of styles (e.g., "Id", "Id keyword", "Comment").
 4. Use these names (separated by |) in your config.
 
-Notes:
-------
+
+Notes
+-----
 - The plugin automatically uses "Simple Naive Mode" (Regex only) for: Markdown, reStructuredText, Textile, ToDo, Todo.txt, JSON and Ini files.
 - Identifiers inside Comments or Strings are usually ignored unless `use_simple_naive_mode` is set to true.
 
@@ -148,7 +150,7 @@ Notes:
 Troubleshooting
 ---------------
 
-- "No editable identifiers found": 
+- "No editable identifiers found":
   If you see this message, then the plugin likely thinks your selection contains only Keywords or Comments. Try setting `use_simple_naive_mode=true` for that lexer to bypass this check, or configure that specific lexer as explained above.
 
 
@@ -156,7 +158,7 @@ About
 -----
 
 Authors:
-  - Vladislav Utkin (https://github.com/viad00) - Author.
+  - Vladislav Utkin (https://github.com/viad00) - Original author.
   - Alexey Torgashin (CudaText) - Made some bug fixes and other improvements.
   - Badr Elmers (https://github.com/badrelmers) - Made a big refactoring by adding: Continous Edit mode, Multisession files edit, gutter activation and optimized the code for speed.
 License: MIT
