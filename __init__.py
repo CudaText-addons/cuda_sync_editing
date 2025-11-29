@@ -193,8 +193,6 @@ class Command:
         """Initializes plugin state."""
         # Dictionary to store sessions: {editor_handle: SyncEditSession}
         self.sessions = {}
-
-        # Load gutter icons into imagelist
         self.icon_inactive = -1
         self.icon_active = -1
 
