@@ -235,8 +235,9 @@ class Command:
     def on_close(self, ed_self):
         handle = self.get_editor_handle(ed_self)
         if handle in self.inited_icon_eds:
-            self.inited_icon_eds.remove(handle)
             # print('Sync Editing: Forget handle')
+            self.inited_icon_eds.remove(handle)
+            self.remove_session(ed_self)
 
     def show_gutter_icon(self, ed_self, line_index, active=False):
         """Shows the gutter icon at the specified line."""
