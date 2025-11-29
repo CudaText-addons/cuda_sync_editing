@@ -56,7 +56,8 @@ NAIVE_LEXERS = [
   'ToDo',
   'Todo.txt',
   'JSON',
-  'Ini files',
+  'JSON ^',
+  'Ini files ^',
 ]
 
 MARKER_CODE = app_proc(PROC_GET_UNIQUE_TAG, '') # Generate a unique integer tag for this plugin's markers to avoid conflicts with other plugins
