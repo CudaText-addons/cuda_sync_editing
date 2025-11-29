@@ -40,6 +40,8 @@ IDENTIFIER_STYLE_INCLUDE_DEFAULT = r'(?i)id[\w\s]*'    # Styles that are conside
 IDENTIFIER_STYLE_EXCLUDE_DEFAULT = '(?i).*keyword.*'   # Styles that are strictly keywords (should not be edited)
 
 CONFIG_FILENAME = 'cuda_sync_editing.ini'
+ICON_INACTIVE_PATH = os.path.join(os.path.dirname(__file__), 'sync_off.png')
+ICON_ACTIVE_PATH = os.path.join(os.path.dirname(__file__), 'sync_on.png')
 
 # Overrides for specific lexers that have unique naming conventions
 NON_STANDARD_LEXERS = {
@@ -62,9 +64,6 @@ NAIVE_LEXERS = [
 
 MARKER_CODE = app_proc(PROC_GET_UNIQUE_TAG, '') # Generate a unique integer tag for this plugin's markers to avoid conflicts with other plugins
 DECOR_TAG = app_proc(PROC_GET_UNIQUE_TAG, '')  # Unique tag for gutter decorations
-
-ICON_INACTIVE_PATH = os.path.join(os.path.dirname(__file__), 'sync_off.png')
-ICON_ACTIVE_PATH = os.path.join(os.path.dirname(__file__), 'sync_on.png')
 
 
 def bool_to_ini(value):
