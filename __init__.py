@@ -192,7 +192,6 @@ class Command:
         """Initializes plugin state."""
         # Dictionary to store sessions: {editor_handle: SyncEditSession}
         self.sessions = {}
-        self.inited_icons = {}
         self.icon_inactive = -1
         self.icon_active = -1
 
@@ -224,10 +223,9 @@ class Command:
 
     def load_gutter_icons(self, ed_self):
         """Load the gutter icon images into CudaText's imagelist."""
-        _h_ed = self.get_editor_handle(ed_self)
-        if self.inited_icons.get(_h_ed, None) is None:
+        if ed_self.get_prop(PROP_TAG, 'sync_ed_icons:0') == '0':
             # print('Sync Editing: Loading icons:', ed_self.get_filename())
-            self.inited_icons[_h_ed] = True
+            ed_self.set_prop(PROP_TAG, 'sync_ed_icons:1')
             _h_im = ed_self.decor(DECOR_GET_IMAGELIST)
             self.icon_inactive = imagelist_proc(_h_im, IMAGELIST_ADD, value=ICON_INACTIVE_PATH)
             self.icon_active = imagelist_proc(_h_im, IMAGELIST_ADD, value=ICON_ACTIVE_PATH)
