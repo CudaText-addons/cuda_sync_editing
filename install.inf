@@ -7,7 +7,7 @@ homepage=https://github.com/CudaText-addons/cuda_sync_editing
 
 [item1]
 section=events
-events=on_start2,on_click~,on_caret~,on_key~,on_click_gutter~,on_close~
+events=on_start2,on_click~,on_caret~,on_key~,on_click_gutter~,on_close~,on_open_reopen~
 
 [item2]
 section=commands
