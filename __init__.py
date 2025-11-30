@@ -59,6 +59,7 @@ NAIVE_LEXERS = [
   'Todo.txt',
   'JSON',
   'JSON ^',
+  'Ini files',
   'Ini files ^',
 ]
 
@@ -884,7 +885,7 @@ class Command:
             start_pos -= 1
 
         # Move start_pos back until we find the beginning of the identifier
-        while session.regex_identifier.match(first_y_line[start_pos:]):
+        while start_pos >= 0 and session.regex_identifier.match(first_y_line[start_pos:]):
             start_pos -= 1
         start_pos += 1
         # Workaround for EOL #65. Safety for EOL/BOL cases
@@ -927,7 +928,7 @@ class Command:
             y_line = ed_self.get_text_line(y)
 
             # Scan backwards to find start of the new word instance. Find the new start X for this instance
-            while session.regex_identifier.match(y_line[x:]):
+            while x >= 0 and session.regex_identifier.match(y_line[x:]):
                 x -= 1
             x += 1
             # Workaround for EOL #65
