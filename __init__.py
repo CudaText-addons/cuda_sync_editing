@@ -439,11 +439,17 @@ class Command:
         # Sort coords of caret
         if (y1, x1) > (y2, x2):
             x1, y1, x2, y2 = x2, y2, x1, y1
-        # Drop tokens out of selection
+        # FIX #15 regression: the problem come from get_sel_lines() it does not return the last empty line, but get_carets() include the last empty line. here we handle selection ending at the start of a new line.
+        # If x2 is 0 and we have multiple lines, it means the selection visually ends at the previous line's end. We adjust x2, y2 to point to the "end" of the previous line so filters don't drop tokens on that line.
+        if x2 == 0 and y2 > y1:
+            y2 -= 1
+            x2 = ed_self.get_line_len(y2)
+        # Drop tokens outside of selection
         tokenlist = [t for t in tokenlist if \
             not (t['y1'] == session.start_l and t['x1'] < x1) and \
             not (t['y2'] == session.end_l and t['x2'] > x2) \
             ]
+
 
         self.set_progress(45)
 
