@@ -59,6 +59,7 @@ NAIVE_LEXERS = [
   'Todo.txt',
   'JSON',
   'JSON ^',
+  'Ini files',
   'Ini files ^',
 ]
 
@@ -873,8 +874,10 @@ class Command:
         session.our_key = None # Temporarily unset to allow clean lookup
 
         # Get current state at the first caret
-        first_y = ed_self.get_carets()[0][1]
-        first_x = ed_self.get_carets()[0][0]
+        carets = ed_self.get_carets()
+        if not carets: return
+        first_y = carets[0][1]
+        first_x = carets[0][0]
         first_y_line = ed_self.get_text_line(first_y)
         start_pos = first_x
 
@@ -884,7 +887,7 @@ class Command:
             start_pos -= 1
 
         # Move start_pos back until we find the beginning of the identifier
-        while session.regex_identifier.match(first_y_line[start_pos:]):
+        while start_pos >= 0 and session.regex_identifier.match(first_y_line[start_pos:]):
             start_pos -= 1
         start_pos += 1
         # Workaround for EOL #65. Safety for EOL/BOL cases
@@ -920,14 +923,30 @@ class Command:
         for i in old_key_dictionary:
             pointers.append(i[0])
 
+        # FIX #14: Sort pointers to process words strictly left-to-right, top-to-bottom
+        pointers.sort(key=lambda p: (p[1], p[0]))
+
+        # FIX #14: Track accumulated shifts per line.
+        # If the first word grows by 1 char, the second word is shifted by 1, the third by 2, etc.
+        line_shifts = {}
+        
         # Recalculate start/end positions for all instances of the edited word
         for pointer in pointers:
-            x = pointer[0]
+            old_x = pointer[0]
             y = pointer[1]
+            
+            # FIX #14: Initialize shift counter for this line if not present
+            if y not in line_shifts:
+                line_shifts[y] = 0
+            
+            # FIX #14: Apply the accumulated shift to find where the word should start now
+            current_search_x = old_x + line_shifts[y]
+            
             y_line = ed_self.get_text_line(y)
 
-            # Scan backwards to find start of the new word instance. Find the new start X for this instance
-            while session.regex_identifier.match(y_line[x:]):
+            # Scan backwards to find start of the new word instance from the adjusted position
+            x = current_search_x
+            while x >= 0 and session.regex_identifier.match(y_line[x:]):
                 x -= 1
             x += 1
             # Workaround for EOL #65
@@ -938,6 +957,9 @@ class Command:
             existing_entries = [item for item in existing_entries if item[0] != (x, y)]
             # Add new position
             existing_entries.append(((x, y), (x+len(new_key), y), new_key, 'Id'))
+            
+            # FIX #14: Increment the shift for the NEXT word on this line
+            line_shifts[y] += length_delta
 
         # Update dictionary keys for the edited word. Clean up old key if it changed completely
         if old_key != new_key:
