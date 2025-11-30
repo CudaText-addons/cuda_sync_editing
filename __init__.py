@@ -241,6 +241,15 @@ class Command:
             self.inited_icon_eds.remove(handle)
         self.remove_session(ed_self)
 
+    def on_open_reopen(self, ed_self):
+        """
+        Called when the file is reloaded/reopened from disk (File → Reload).
+        The entire document content is replaced, so all marker positions become invalid.
+        We must fully exit sync editing to avoid crashes or visual glitches.
+        """
+        if self.has_session(ed_self):
+            self.reset(ed_self)
+            
     def show_gutter_icon(self, ed_self, line_index, active=False):
         """Shows the gutter icon at the specified line."""
         # Remove any existing gutter icon first
