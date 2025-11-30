@@ -9,6 +9,7 @@ from . import randomcolor
 from cudatext import *
 from cudatext_keys import *
 from cudax_lib import html_color_to_int
+from collections import defaultdict
 
 from cudax_lib import get_translation
 _ = get_translation(__file__)  # I18N
@@ -359,7 +360,7 @@ class Command:
             return
 
         self.set_progress(3)
-        session.dictionary = {}
+        session.dictionary = defaultdict(list)
 
         # Save coordinates and "Lock" the selection
         session.start_l, session.end_l = ed_self.get_sel_lines()
@@ -381,22 +382,17 @@ class Command:
         # --- 2. Lexer / Parser Configuration ---
         # Instantiate config to get fresh values from disk on every session
         ini_config = PluginConfig()
-
-        # Force naive way if lexer is none or lexer is one of the text file types
+        
         cur_lexer = ed_self.get_prop(PROP_LEXER_FILE)
         session.use_simple_naive_mode = ini_config.get_lexer_bool(cur_lexer, 'use_simple_naive_mode', USE_SIMPLE_NAIVE_MODE_DEFAULT)
-        if cur_lexer == '':
-            # If lexer is none, use simple naive mode
+        
+        # Force naive way if lexer is none or lexer is one of the text file types
+        if not cur_lexer or cur_lexer in NAIVE_LEXERS:
             session.use_simple_naive_mode = True
-        if cur_lexer in NAIVE_LEXERS or session.use_simple_naive_mode:
-            session.use_simple_naive_mode = True
-
+        
         # Determine if we use specific lexer rules
-        if cur_lexer in NON_STANDARD_LEXERS:
-            # If it is non-standard lexer, change its behavior
-            local_styles_default = NON_STANDARD_LEXERS[cur_lexer]
-        else:
-            local_styles_default = IDENTIFIER_STYLE_INCLUDE_DEFAULT
+        # If it is non-standard lexer, change its behavior otherwise use the default
+        local_styles_default = NON_STANDARD_LEXERS.get(cur_lexer, IDENTIFIER_STYLE_INCLUDE_DEFAULT)
         session.identifier_style_include = ini_config.get_lexer_str(cur_lexer, 'identifier_style_include', local_styles_default)
 
         # Load Lexer/Global Configs into session
@@ -469,8 +465,11 @@ class Command:
             self.set_progress(-1)
             restore_caret()
             return
-
-        elif session.use_simple_naive_mode:
+        
+        # Pre-compute case sensitivity handler
+        key_normalizer = (lambda s: s.lower()) if not session.case_sensitive else (lambda s: s)
+        
+        if session.use_simple_naive_mode:
             # Naive Mode: Scan text purely by Regex, ignoring syntax context
             for y in range(session.start_l, session.end_l+1):
                 cur_line = ed_self.get_text_line(y)
@@ -480,35 +479,28 @@ class Command:
                         continue
                     if y == session.end_l and match.end() > x2:
                         continue
+                    key = key_normalizer(match.group())
                     # Create pseudo-token structure: ((x1, y1), (x2, y2), string, style)
                     token = ((match.start(), y), (match.end(), y), match.group(), 'id')
-                    if match.group() in session.dictionary:
-                        session.dictionary[match.group()].append(token)
-                    else:
-                        session.dictionary[match.group()] = [(token)]
+                    session.dictionary[key].append(token)
         else:
-            # Standard Mode: Filter tokens by Style (Variable, Function, etc.)
+            # Standard Lexer Mode: Filter tokens by Style (Variable, Function, etc.)
             for token in tokenlist:
                 if not self.token_style_ok(ed_self, token['style']):
                     continue
-                idd = token['str'].strip()
-                if not session.case_sensitive:
-                    idd = idd.lower()
-
+                
+                idd = key_normalizer(token['str'].strip())
                 # Structure: ((x1, y1), (x2, y2), string, style)
                 old_style_token = ((token['x1'], token['y1']), (token['x2'], token['y2']), token['str'], token['style'])
-
-                if idd in session.dictionary:
-                    if old_style_token not in session.dictionary[idd]:
-                        session.dictionary[idd].append(old_style_token)
-                else:
-                    session.dictionary[idd] = [(old_style_token)]
-
+                session.dictionary[idd].append(old_style_token)
+        
         self.set_progress(60)
-        self.fix_tokens(ed_self) # Clean up whitespace issues and remove singletons
+        
+        # Remove Singletons: We delete keys that don't have duplicates because sync editing requires at least 2 occurrences. (issue #44 and #45)
+        session.dictionary = {k: v for k, v in session.dictionary.items() if len(v) >= 2}
 
         # Validation: Ensure we actually found words to edit. Exit if no id's (eg: comments and etc)
-        if len(session.dictionary) == 0:
+        if not session.dictionary:
             self.reset(ed_self)
             msg_status(_('Sync Editing: No editable identifiers found in selection'))
             self.set_progress(-1)
@@ -525,51 +517,6 @@ class Command:
         msg_status(_('Sync Editing: Click an ID to edit, click gutter icon or press Esc to exit.'))
         # restore caret but w/o selection
         restore_caret()
-
-    # Fix tokens with spaces at the start of the line (eg: ((0, 50), (16, 50), '        original', 'Id')) and remove if it has 1 occurence (issue #44 and #45)
-    def fix_tokens(self, ed_self):
-        """
-        Post-processing of tokens found by Lexer/Regex.
-        1. Trims whitespace from the start of tokens (Lexers sometimes include leading space in ranges).
-        2. Removes any identifiers that have fewer than 2 occurrences (cannot sync-edit a single word).
-        """
-        session = self.get_session(ed_self)
-        new_replace = []
-
-        # Pass 1: Trim Whitespace
-        for key in session.dictionary:
-            for key_tuple in session.dictionary[key]:
-                token = key_tuple[2]
-                # If token starts with space, calculate offset
-                if token and token[0] != ' ':
-                    continue  # Skip if no leading space (optimization)
-                offset = 0
-                for i in range(len(token)):
-                    if token[i] != ' ':
-                        offset = i
-                        break
-                # Create new trimmed token tuple
-                new_token = token[offset:]
-                new_start = key_tuple[0][0] + offset
-                new_tuple = ((new_start, key_tuple[0][1]), key_tuple[1], new_token, key_tuple[3])
-                new_replace.append([new_tuple, key_tuple])
-
-        # Update the dictionary with corrected tokens (replacements)
-        for neww in new_replace:
-            for key in list(session.dictionary.keys()):  # Use list() to avoid runtime errors during iteration
-                for i in range(len(session.dictionary[key])):
-                    if session.dictionary[key][i] == neww[1]:
-                        session.dictionary[key][i] = neww[0]
-
-        # Pass 2: Remove Singletons
-        # We delete keys that don't have duplicates because sync editing requires at least 2 instances.
-        todelete = []
-        for key in list(session.dictionary.keys()):
-            if len(session.dictionary[key]) < 2:
-                todelete.append(key)
-
-        for dell in todelete:
-            session.dictionary.pop(dell, None)
 
     def set_progress(self, prg):
         """Updates the CudaText status bar progress (fixes issue #46)."""
