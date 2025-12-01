@@ -30,10 +30,10 @@ _ = get_translation(__file__)  # I18N
 
 
 # Set to True to enable code profiling (outputs to CudaText console).
-ENABLE_PROFILING = True
+ENABLE_PROFILING = False
 ENABLE_PROFILING_inside_on_caret = False
 ENABLE_PROFILING_inside_redraw = False
-ENABLE_BENCH_TIMER = True # print real time spent, usefull when profiling is disabled because profiling adds more overhead
+ENABLE_BENCH_TIMER = False # print real time spent, usefull when profiling is disabled because profiling adds more overhead
 if ENABLE_BENCH_TIMER:
     import time
 
