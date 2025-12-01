@@ -29,6 +29,14 @@ _ = get_translation(__file__)  # I18N
 # 5. Exit: Clicking the gutter icon again or pressing 'ESC' fully terminates the session.
 
 
+# Set to True to enable code profiling (outputs to CudaText console).
+ENABLE_PROFILING = True
+ENABLE_PROFILING_inside_on_caret = False
+ENABLE_PROFILING_inside_redraw = False
+ENABLE_BENCH_TIMER = True # print real time spent, usefull when profiling is disabled because profiling adds more overhead
+if ENABLE_BENCH_TIMER:
+    import time
+
 # --- Default Configuration ---
 USE_COLORS_DEFAULT = True
 USE_SIMPLE_NAIVE_MODE_DEFAULT = False
@@ -335,6 +343,13 @@ class Command:
 
         All configuration is read fresh from file/theme on every start so the user does not need to restart CudaText.
         """
+        # === PROFILING START: START_SYNC_EDIT ===
+        if ENABLE_PROFILING:
+            pr_start, s_start = start_profiling()
+        if ENABLE_BENCH_TIMER:
+            t0 = time.perf_counter()
+        # ========================================
+        
         session = self.get_session(ed_self)
         # now that we created a session we should always call update_gutter_icon_on_selection before start_sync_edit to set gutter_icon_line (set by show_gutter_icon) which will be used in start_sync_edit to set the active gutter icon
         # Update gutter icon before starting to ensure session.gutter_icon_line is set. This allows us to flip it to "Active" mode shortly after.
@@ -344,6 +359,11 @@ class Command:
         if len(carets) != 1:
             self.reset(ed_self)
             msg_status(_('Sync Editing: Need single caret'))
+            
+            # === PROFILING STOP: START_SYNC_EDIT (Exit Early) ===
+            if ENABLE_PROFILING:
+                stop_profiling(pr_start, s_start, title='PROFILE: start_sync_edit (Entry Mode - Early Exit)')
+            # ====================================================
             return
         caret = carets[0]
 
@@ -357,6 +377,11 @@ class Command:
         if not original:
             self.reset(ed_self)
             msg_status(_('Sync Editing: Make selection first'))
+            
+            # === PROFILING STOP: START_SYNC_EDIT (Exit Early) ===
+            if ENABLE_PROFILING:
+                stop_profiling(pr_start, s_start, title='PROFILE: start_sync_edit (Entry Mode - Early Exit)')
+            # ====================================================
             return
 
         self.set_progress(3)
@@ -433,7 +458,8 @@ class Command:
         # self.set_progress(10) # do not use this here before ed.action(EDACTION_LEXER_SCAN. see bug: https://github.com/Alexey-T/CudaText/issues/6120 the bug happen only with this line. Alexey said: app_idle is the main reason, it is bad to insert it before some parsing action. Usually app_idle is needed after some action, to run the app message processing. Not before. Dont use it if not nessesary...
 
         # Run lexer scan from start. Force a Lexer scan to ensure tokens are up to date
-        ed_self.action(EDACTION_LEXER_SCAN, session.start_l) #API 1.0.289
+        # EDACTION_LEXER_SCAN seems not needed anymore see:https://github.com/Alexey-T/CudaText/issues/6124
+        # ed_self.action(EDACTION_LEXER_SCAN, session.start_l) #API 1.0.289
         self.set_progress(40)
 
         # Find all occurences of regex, get all tokens in the selected range
@@ -464,6 +490,11 @@ class Command:
             msg_status(_('Sync Editing: No syntax tokens found in selection'))
             self.set_progress(-1)
             restore_caret()
+            
+            # === PROFILING STOP: START_SYNC_EDIT (Exit Early) ===
+            if ENABLE_PROFILING:
+                stop_profiling(pr_start, s_start, title='PROFILE: start_sync_edit (Entry Mode - Early Exit)')
+            # ====================================================
             return
         
         # Pre-compute case sensitivity handler
@@ -505,6 +536,11 @@ class Command:
             msg_status(_('Sync Editing: No editable identifiers found in selection'))
             self.set_progress(-1)
             restore_caret()
+            
+            # === PROFILING STOP: START_SYNC_EDIT (Exit Early) ===
+            if ENABLE_PROFILING:
+                stop_profiling(pr_start, s_start, title='PROFILE: start_sync_edit (Entry Mode - Early Exit)')
+            # ====================================================
             return
 
         self.set_progress(90)
@@ -517,6 +553,14 @@ class Command:
         msg_status(_('Sync Editing: Click an ID to edit, click gutter icon or press Esc to exit.'))
         # restore caret but w/o selection
         restore_caret()
+        
+        # === PROFILING STOP: START_SYNC_EDIT ===
+        if ENABLE_PROFILING:
+            stop_profiling(pr_start, s_start, sort_key='cumulative', max_lines=200, title='PROFILE: start_sync_edit (Entry Mode)')
+        # see wall-clock time (Python + native marker add + repaint)
+        if ENABLE_BENCH_TIMER:
+            print(f"START_SYNC_EDIT: {time.perf_counter() - t0:.4f}s")
+        # =======================================
 
     def set_progress(self, prg):
         """Updates the CudaText status bar progress (fixes issue #46)."""
@@ -532,21 +576,39 @@ class Command:
         session = self.get_session(ed_self)
         if not session.use_colors:
             return
+        
         rand_color = randomcolor.RandomColor()
+        
+        # Collect all markers to add, sorted by (y, x)
+        markers_to_add = []
+        
         for key in session.dictionary:
             # Generate unique color for every unique word
             color  = html_color_to_int(rand_color.generate(luminosity='light')[0])
             for key_tuple in session.dictionary[key]:
-                ed_self.attr(MARKERS_ADD,
-                    tag = MARKER_CODE,
-                    x = key_tuple[0][0],
-                    y = key_tuple[0][1],
-                    len = key_tuple[1][0] - key_tuple[0][0],
-                    color_font = 0xb000000, # this color is better than marker_fg_color especially with black themes because we use colored background
-                    color_bg = color,
-                    color_border = 0xb000000,
-                    border_down = 1
-                    )
+                markers_to_add.append((
+                    key_tuple[0][1],  # y
+                    key_tuple[0][0],  # x
+                    key_tuple[1][0] - key_tuple[0][0],  # len
+                    color
+                ))
+        
+        # Sort markers by (y, x) because this is what attr(MARKERS_ADD does internally, so we help it here to speed up things
+        # this is very important for big files, a 9mb javascript file with 400k duplicates takes 14min, with this it takes only 22s see: https://github.com/CudaText-addons/cuda_sync_editing/issues/23
+        markers_to_add.sort(key=lambda m: (m[0], m[1]))
+        
+        # Add all markers in sorted order
+        for y, x, length, color in markers_to_add:
+            ed_self.attr(MARKERS_ADD,
+                tag=MARKER_CODE,
+                x=x,
+                y=y,
+                len=length,
+                color_font=0xb000000, # this color is better than marker_fg_color especially with black themes because we use colored background
+                color_bg=color,
+                color_border=0xb000000,
+                border_down=1
+            )
 
     def finish_editing(self, ed_self):
         """
@@ -707,21 +769,34 @@ class Command:
         session.our_key = clicked_key
         session.original = (caret[0], caret[1])
 
-        # Add active carets and borders to ALL instances of the clicked word
+        # Collect all markers to add, sorted by (y, x)
+        markers_to_add = []
         for key_tuple in session.dictionary[session.our_key]:
-            ed_self.attr(MARKERS_ADD, tag = MARKER_CODE, \
-            x = key_tuple[0][0], y = key_tuple[0][1], \
-            len = key_tuple[1][0] - key_tuple[0][0], \
-            color_font=session.marker_fg_color, \
-            color_bg=session.marker_bg_color, \
-            color_border=session.marker_border_color, \
-            border_left=1, \
-            border_right=1, \
-            border_down=1, \
-            border_up=1 \
+            markers_to_add.append((
+                key_tuple[0][1],  # y
+                key_tuple[0][0],  # x
+                key_tuple[1][0] - key_tuple[0][0],  # len
+                offset  # store offset for caret placement
+            ))
+        
+        # Sort markers by (y, x)
+        markers_to_add.sort(key=lambda m: (m[0], m[1]))
+        
+        # Add active carets and borders to ALL instances of the clicked word
+        for y, x, length, off in markers_to_add:
+            ed_self.attr(MARKERS_ADD, tag=MARKER_CODE,
+                x=x, y=y,
+                len=length,
+                color_font=session.marker_fg_color,
+                color_bg=session.marker_bg_color,
+                color_border=session.marker_border_color,
+                border_left=1,
+                border_right=1,
+                border_down=1,
+                border_up=1
             )
             # Add secondary caret at the corresponding offset
-            ed_self.set_caret(key_tuple[0][0] + offset, key_tuple[0][1], id=CARET_ADD)
+            ed_self.set_caret(x + off, y, id=CARET_ADD)
 
         # Update state
         session.selected = False
@@ -765,7 +840,12 @@ class Command:
             # Only show/hide gutter icon when NOT in sync edit mode
             self.update_gutter_icon_on_selection(ed_self)
             return
-
+        
+        # === PROFILING START: ON_CARET ===
+        if ENABLE_PROFILING_inside_on_caret:
+            pr_on_caret, s_on_caret = start_profiling()
+        # =================================
+        
         # Now we know sync edit is active, get session
         session = self.get_session(ed_self)
 
@@ -796,11 +876,21 @@ class Command:
                     # This prevents flashing colors when switching directly between IDs
                 else:
                     self.finish_editing(ed_self)
+
+                # === PROFILING STOP: ON_CARET (Exit Editing) ===
+                if ENABLE_PROFILING_inside_on_caret:
+                    stop_profiling(pr_on_caret, s_on_caret, sort_key='cumulative', title='PROFILE: on_caret (Exit Editing)')
+                # ===============================================
                 return
 
             # NOTE: self.redraw(ed_self) is called here to update word markers live during typing.
             # This recalculates borders and shifts other tokens on the line as the word grows/shrinks. This is a performance hit on simple caret moves (arrow keys) but necessary for live updates.
             self.redraw(ed_self)
+        
+        # === PROFILING STOP: ON_CARET (End of function) ===
+        if ENABLE_PROFILING_inside_on_caret:
+            stop_profiling(pr_on_caret, s_on_caret, sort_key='cumulative', title='PROFILE: on_caret (End)')
+        # =================================================
 
     def on_key(self, ed_self, key, _state):
         """
@@ -815,9 +905,6 @@ class Command:
             self.reset(ed_self)
             return False
 
-    def on_start2(self, ed_self):
-        pass
-
     def redraw(self, ed_self):
         """
         Dynamically updates markers and dictionary positions during typing.
@@ -827,8 +914,20 @@ class Command:
         3. Shift positions of ALL other words that exist on the same line after the caret.
         4. Re-draw all the borders.
         """
+        # === PROFILING START: REDRAW ===
+        # Measures the time taken for recalculating positions on a keypress.
+        if ENABLE_PROFILING_inside_redraw:
+            pr_redraw, s_redraw = start_profiling()
+        if ENABLE_BENCH_TIMER:
+            t0 = time.perf_counter()
+        # ===============================
+
         session = self.get_session(ed_self)
         if not session.our_key:
+            # === PROFILING STOP: REDRAW (Exit Early 1) ===
+            if ENABLE_PROFILING_inside_redraw:
+                stop_profiling(pr_redraw, s_redraw, sort_key='cumulative', title='PROFILE: redraw (Live Typing - Exit Early 1)')
+            # ===========================================
             return
 
         # 1. Capture State. Find out what changed on the first caret (on others changes will be the same)
@@ -862,6 +961,11 @@ class Command:
             # Word was deleted completely
             session.our_key = old_key
             ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
+            
+            # === PROFILING STOP: REDRAW (Exit Early 2) ===
+            if ENABLE_PROFILING_inside_redraw:
+                stop_profiling(pr_redraw, s_redraw, sort_key='cumulative', title='PROFILE: redraw (Live Typing - Exit Early 2)')
+            # ===========================================
             return
 
         new_key = match.group(0)
@@ -975,19 +1079,39 @@ class Command:
         # 5. Repaint borders for ALL words
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
 
-        # Draw active borders for the currently edited word
+        # Collect all markers to add, sorted by (y, x)
+        markers_to_add = []
         for key_tuple in session.dictionary[session.our_key]:
-                ed_self.attr(MARKERS_ADD, tag = MARKER_CODE, \
-                x = key_tuple[0][0], y = key_tuple[0][1], \
-                len = key_tuple[1][0] - key_tuple[0][0], \
-                color_font=session.marker_fg_color, \
-                color_bg=session.marker_bg_color, \
-                color_border=session.marker_border_color, \
-                border_left=1, \
-                border_right=1, \
-                border_down=1, \
-                border_up=1 \
-                )
+            markers_to_add.append((
+                key_tuple[0][1],  # y
+                key_tuple[0][0],  # x
+                key_tuple[1][0] - key_tuple[0][0]  # len
+            ))
+        
+        # Sort markers by (y, x)
+        markers_to_add.sort(key=lambda m: (m[0], m[1]))
+        
+        # Draw active borders for the currently edited word
+        for y, x, length in markers_to_add:
+            ed_self.attr(MARKERS_ADD, tag=MARKER_CODE,
+                x=x, y=y,
+                len=length,
+                color_font=session.marker_fg_color,
+                color_bg=session.marker_bg_color,
+                color_border=session.marker_border_color,
+                border_left=1,
+                border_right=1,
+                border_down=1,
+                border_up=1
+            )
+
+        # === PROFILING STOP: REDRAW ===
+        if ENABLE_PROFILING_inside_redraw:
+            stop_profiling(pr_redraw, s_redraw, sort_key='time', max_lines=200, title='PROFILE: redraw (Live Typing)')
+        if ENABLE_BENCH_TIMER:
+            # see wall-clock time (Python + native marker add + repaint)
+            print(f"REDRAW: {time.perf_counter() - t0:.4f}s  instances={len(existing_entries)}")
+        # ==============================
 
     def config(self):
         """Opens the plugin configuration INI file."""
@@ -996,3 +1120,51 @@ class Command:
             file_open(ini_config.file_path)
         except Exception as ex:
             msg_status(_('Cannot open config: ') + str(ex))
+
+
+def start_profiling():
+    """Initializes and enables the profiler, and creates an IO stream."""
+    import cProfile
+    import io
+    pr = cProfile.Profile()
+    pr.enable()
+    s = io.StringIO()
+    return pr, s
+
+def stop_profiling(pr, s, sort_key='cumulative', max_lines=20, title='Profile Results'):
+    """
+    Disables the profiler, processes the stats, and prints them.
+    Accepts pr (cProfile.Profile) and s (io.StringIO) objects.
+    """
+    import pstats
+    
+    # pr and s are guaranteed to be non-None if stop_profiling is called when ENABLE_PROFILING is True.
+    
+    try:
+        pr.disable()
+    except ValueError:
+        # This can happen if an exception occurred in the profiled code before pr.enable() finished,
+        # or if the profiler was stopped manually beforehand (which is now avoided).
+        print(f"ERROR: Profiler for {title} was not properly enabled/disabled.")
+        return
+
+    # Get the stats object
+    try:
+        # Map human-readable sort_key to pstats.SortKey
+        # default is sort by cumulative time (time spent in function + all sub-functions)
+        sort_map = {
+            'cumulative': pstats.SortKey.CUMULATIVE,
+            'time': pstats.SortKey.TIME,
+        }
+        sortby = sort_map.get(sort_key.lower(), pstats.SortKey.CUMULATIVE)
+        
+        ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
+        
+        # Print the stats to the in-memory stream 's'
+        ps.print_stats(max_lines) 
+        
+        # Print the captured output to the console/log
+        print(f"\n--- {title} ---")
+        print(s.getvalue())
+    except Exception as e:
+        print(f"ERROR: Error processing profiling results for {title}: {e}")
