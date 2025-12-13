@@ -371,9 +371,10 @@ class Command:
         Starts sync editing session.
         1. Validates selection.
         2. Scans text (via Lexer or Regex).
-        3. Groups identical words.
-        4. Applies visual markers (colors) - ONLY FOR VISIBLE VIEWPORT PORTION.
-        5. Builds spatial index for fast lookups.
+        3. Groups identical words into dictionary.
+        4. Filters singletons (words with < 2 occurrences).
+        5. Builds spatial index for fast lookups. Builds spatial index (line_index) ONLY for valid words.        
+        6. Applies visual markers (colors) - ONLY FOR VISIBLE VIEWPORT PORTION.
 
         All configuration is read fresh from file/theme on every start so the user does not need to restart CudaText.
         """
@@ -535,7 +536,7 @@ class Command:
         # Pre-compute case sensitivity handler
         key_normalizer = (lambda s: s.lower()) if not session.case_sensitive else (lambda s: s)
         
-        # OPTIMIZATION: Build both dictionary and line_index simultaneously
+        # Step A: Build Dictionary First (Do not touch line_index yet)
         if session.use_simple_naive_mode:
             # Naive Mode: Scan text purely by Regex, ignoring syntax context
             for y in range(session.start_l, session.end_l+1):
@@ -549,7 +550,6 @@ class Command:
                     key = key_normalizer(match.group())
                     token_ref = TokenRef(match.start(), y, match.end(), y, match.group(), 'id')
                     session.dictionary[key].append(token_ref)
-                    session.line_index[y].append((token_ref, key))
         else:
             # Standard Lexer Mode: Filter tokens by Style (Variable, Function, etc.)
             for token in tokenlist:
@@ -561,19 +561,12 @@ class Command:
                 idd = key_normalizer(token['str'].strip())
                 token_ref = TokenRef(token['x1'], token['y1'], token['x2'], token['y2'], token['str'], token['style'])
                 session.dictionary[idd].append(token_ref)
-                session.line_index[token['y1']].append((token_ref, idd))
         
         self.set_progress(60)
         
-        # Remove Singletons: We delete keys that don't have duplicates because sync editing requires at least 2 occurrences. (issue #44 and #45)
+        # Step B: Remove Singletons (Clean garbage): We delete keys that don't have duplicates because sync editing requires at least 2 occurrences. (issue #44 and #45)
         session.dictionary = {k: v for k, v in session.dictionary.items() if len(v) >= 2}
         
-        # Update line index to remove singletons
-        for line_num in list(session.line_index.keys()):
-            session.line_index[line_num] = [(ref, key) for ref, key in session.line_index[line_num] if key in session.dictionary]
-            if not session.line_index[line_num]:
-                del session.line_index[line_num]
-
         # Validation: Ensure we actually found words to edit. Exit if no id's (eg: comments and etc)
         if not session.dictionary:
             self.reset(ed_self)
@@ -586,6 +579,12 @@ class Command:
                 stop_profiling(pr_start, s_start, title='PROFILE: start_sync_edit (Entry Mode - Early Exit)')
             # ====================================================
             return
+
+        # Step C: Build Line Index (Only for valid tokens)
+        # This is faster because we don't index tokens we just deleted
+        for key, tokens in session.dictionary.items():
+            for token_ref in tokens:
+                session.line_index[token_ref.start_y].append((token_ref, key))
 
         self.set_progress(90)
 
@@ -1102,6 +1101,7 @@ class Command:
         HEAVILY OPTIMIZED
         - Delta-based position updates (only shift what changed)
         - Line-based spatial index for O(1) lookups
+        - Handles collision (merging) when renaming variable to existing one.
         - In-place TokenRef updates (no tuple recreation)
         - Early exit when nothing changed
         - O(k) complexity where k = tokens per line
@@ -1133,6 +1133,8 @@ class Command:
         first_y = carets[0][1]
         first_x = carets[0][0]
         first_y_line = ed_self.get_text_line(first_y)
+        
+        # Find start of the word under caret
         start_pos = first_x
 
         # Backtrack from caret to find start of the new word
@@ -1191,7 +1193,7 @@ class Command:
         for token_ref in edited_tokens:
             affected_lines.add(token_ref.start_y)  # y coordinate
 
-        # 3. Rebuild Dictionary positions for the modified Active Word with new values
+        # 3. Rebuild Dictionary positions for the modified Active Word with new values (Delta shifting)
         # Delta-based updates: For each edited token instance, apply delta and shift other tokens on same line
         for token_ref in edited_tokens:
             line_num = token_ref.start_y
@@ -1215,7 +1217,7 @@ class Command:
             token_ref.end_x = search_x + new_length
             token_ref.text = new_key
             
-            # 4. Shift other tokens on this line that come AFTER this token
+            # Shift other tokens on this line that come AFTER this token
             # Only process tokens on the same line (using spatial index)
             if delta != 0 and line_num in session.line_index:
                 for other_ref, other_key in session.line_index[line_num]:
@@ -1227,18 +1229,29 @@ class Command:
                     if other_ref.start_x > old_token_x:
                         other_ref.shift(delta)
 
-        # Update dictionary keys if word changed
+        # 4. Update dictionary keys if word changed, and also handle collisions (when we edit a word and create a new word that already existed before)
         if old_key != new_key:
-            session.dictionary[new_key] = edited_tokens
+            # Handle collision if new_key already exists
+            if new_key in session.dictionary:
+                # Merge current tokens into existing list
+                session.dictionary[new_key].extend(edited_tokens)
+            else:
+                # Create new entry
+                session.dictionary[new_key] = edited_tokens
+
             del session.dictionary[old_key]
             
-            # Update line index references
+            # Update line index references (key string update)
             for line_num in affected_lines:
                 if line_num in session.line_index:
-                    session.line_index[line_num] = [
-                        (ref, new_key if key == old_key else key) 
-                        for ref, key in session.line_index[line_num]
-                    ]
+                    new_line_list = []
+                    for ref, k in session.line_index[line_num]:
+                         # Check identity to update only the modified tokens
+                         if ref in edited_tokens:
+                             new_line_list.append((ref, new_key))
+                         else:
+                             new_line_list.append((ref, k))
+                    session.line_index[line_num] = new_line_list
             
             session.our_key = new_key
         else:
