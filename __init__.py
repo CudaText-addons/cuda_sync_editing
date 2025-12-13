@@ -419,8 +419,9 @@ class Command:
             # ====================================================
             return
 
-        session.dictionary = defaultdict(list)
-        session.line_index = defaultdict(list)
+        # Use plain dict (slightly faster for write-heavy workload than defaultdict)
+        session.dictionary = {}
+        session.line_index = {}
 
         # Save coordinates and "Lock" the selection
         session.start_l, session.end_l = ed_self.get_sel_lines()
@@ -443,11 +444,10 @@ class Command:
         ini_config = PluginConfig()
         
         cur_lexer = ed_self.get_prop(PROP_LEXER_FILE)
-        session.use_simple_naive_mode = ini_config.get_lexer_bool(cur_lexer, 'use_simple_naive_mode', USE_SIMPLE_NAIVE_MODE_DEFAULT)
         
         # Force naive way if lexer is none or lexer is one of the text file types
-        if not cur_lexer or cur_lexer in NAIVE_LEXERS:
-            session.use_simple_naive_mode = True
+        is_naive_lexer = not cur_lexer or cur_lexer in NAIVE_LEXERS
+        session.use_simple_naive_mode = is_naive_lexer or ini_config.get_lexer_bool(cur_lexer, 'use_simple_naive_mode', USE_SIMPLE_NAIVE_MODE_DEFAULT)
         
         # Determine if we use specific lexer rules
         # If it is non-standard lexer, change its behavior otherwise use the default
@@ -501,16 +501,6 @@ class Command:
             t_prev = t_now
         if SHOW_PROGRESS: self.set_progress(30)
 
-        # Find all occurences of regex, get all tokens in the selected range
-        tokenlist = ed_self.get_token(TOKEN_LIST_SUB, session.start_l, session.end_l) or []
-        # print("tokenlist",tokenlist)
-
-        if ENABLE_BENCH_TIMER: 
-            t_now = time.perf_counter()
-            print(f"START_SYNC_EDIT 30% get_token: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
-            t_prev = t_now
-        if SHOW_PROGRESS: self.set_progress(60)
-        
         # Coordinate Correction
         x1, y1, x2, y2 = caret
         # Sort coords of caret
@@ -522,34 +512,8 @@ class Command:
             y2 -= 1
             x2 = ed_self.get_line_len(y2)
 
-        # --- 3. Token Processing ---
-        if not tokenlist and not session.use_simple_naive_mode:
-            self.reset(ed_self)
-            msg_status(_('Sync Editing: No syntax tokens found in selection'))
-            if SHOW_PROGRESS: self.set_progress(-1)
-            restore_caret()
-            
-            # === PROFILING STOP: START_SYNC_EDIT (Exit Early) ===
-            if ENABLE_PROFILING_inside_start_sync_edit:
-                stop_profiling(pr_start, s_start, title='PROFILE: start_sync_edit (Entry Mode - Early Exit)')
-            # ====================================================
-            return
-        
         # Pre-compute case sensitivity handler
         key_normalizer = (lambda s: s) if session.case_sensitive else (lambda s: s.lower())
-        
-        # OPTIMIZATION: Pre-compile style checks once for all unique styles
-        # Build a set of all unique style strings first, then batch-check them
-        unique_styles = set()
-        if not session.use_simple_naive_mode:
-            for token in tokenlist:
-                unique_styles.add(token['style'])
-        
-        # Batch validate all unique styles at once (much faster than per-token)
-        style_cache = {
-            style: bool(include_re.match(style) and not exclude_re.match(style))
-            for style in unique_styles
-        }
 
         # Step A: Build Dictionary AND Line Index simultaneously (single pass)
         # OPTIMIZATION: Combine dictionary + line_index construction to avoid double iteration
@@ -570,11 +534,49 @@ class Command:
                     token_ref = TokenRef(mstart, y, mend, y, matchg, 'id')
                     
                     # Build dict and line_index simultaneously
-                    session.dictionary[key].append(token_ref)
-                    session.line_index[y].append((token_ref, key))
+                    if key in session.dictionary:
+                        session.dictionary[key].append(token_ref)
+                    else:
+                        session.dictionary[key] = [token_ref]
+                    
+                    if y in session.line_index:
+                        session.line_index[y].append((token_ref, key))
+                    else:
+                        session.line_index[y] = [(token_ref, key)]
+
         else:
             # === LEXER MODE (Syntax Aware) ===
             # Standard Lexer Mode: Filter tokens by Style (Variable, Function, etc.)
+            
+            # 1. Get Tokens in the selected range
+            tokenlist = ed_self.get_token(TOKEN_LIST_SUB, start_l, end_l) or []
+            
+            if not tokenlist:
+                self.reset(ed_self)
+                msg_status(_('Sync Editing: No syntax tokens found in selection'))
+                if SHOW_PROGRESS: self.set_progress(-1)
+                restore_caret()
+                
+                # === PROFILING STOP: START_SYNC_EDIT (Exit Early) ===
+                if ENABLE_PROFILING_inside_start_sync_edit:
+                    stop_profiling(pr_start, s_start, title='PROFILE: start_sync_edit (Entry Mode - Early Exit)')
+                # ====================================================
+                return
+
+            if ENABLE_BENCH_TIMER: 
+                t_now = time.perf_counter()
+                print(f"START_SYNC_EDIT 30% get_token: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
+                t_prev = t_now
+            if SHOW_PROGRESS: self.set_progress(60)
+
+            # Pre-build style checks once for all unique styles
+            # Build a set of all unique style strings first, then batch-check them
+            unique_styles = {t['style'] for t in tokenlist}
+            # Batch validate all unique styles at once (much faster than per-token)
+            style_valid = {
+                style: bool(include_re.match(style) and not exclude_re.match(style))
+                for style in unique_styles
+            }
             
             # Process tokens with immediate TokenRef creation
             for token in tokenlist:
@@ -583,7 +585,7 @@ class Command:
                 if token['y2'] == end_l and token['x2'] > x2: continue
                 
                 # B. Check if a token's style matches the allowed patterns (IDs) and rejects Keywords (O(1) dict lookup)
-                if not style_cache.get(token['style'], False):
+                if not style_valid.get(token['style'], False):
                     continue
                 
                 # C. Add to dictionary AND line index in one pass
@@ -591,8 +593,16 @@ class Command:
                 token_ref = TokenRef(token['x1'], token['y1'], token['x2'], token['y2'], token['str'], token['style'])
                 
                 # Build dict and line_index simultaneously
-                session.dictionary[idd].append(token_ref)
-                session.line_index[token['y1']].append((token_ref, idd))
+                if idd in session.dictionary:
+                    session.dictionary[idd].append(token_ref)
+                else:
+                    session.dictionary[idd] = [token_ref]
+                
+                y = token['y1']
+                if y in session.line_index:
+                    session.line_index[y].append((token_ref, idd))
+                else:
+                    session.line_index[y] = [(token_ref, idd)]
         
         if ENABLE_BENCH_TIMER: 
             t_now = time.perf_counter()
