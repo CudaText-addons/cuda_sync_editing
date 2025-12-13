@@ -252,8 +252,7 @@ class SyncEditSession:
     def __init__(self):
         self.selected = False
         self.editing = False
-        self.original_occurrence_index = None  # Which occurrence (0, 1, 2...) was clicked
-
+        
         # OPTIMIZATION: Line-based spatial index for O(1) line lookups
         # Structure: { line_num: [(TokenRef, word_key)] }
         # Allows fast queries like "what tokens are on line 42?"
@@ -286,6 +285,8 @@ class SyncEditSession:
         self.marker_bg_color = None
         self.marker_border_color = None
         self.word_colors = {}  # Cache of {word: color} to maintain consistent colors and reduce overhead
+
+        self.original_occurrence_index = None  # Tracks which occurrence (0, 1, 2...) the user originally clicked
 
 
 class Command:
@@ -1024,26 +1025,151 @@ class Command:
         # Remove the "Active Editing" markers (borders)
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
 
-        # Reset carets to single caret at the ORIGINAL position
-        # Use the occurrence index to find the correct caret
+        """
+        SOLVE THE CARET POSITIONING PROBLEM:
+        ================================================
+        when the user switch from Edit Mode to Selection/View mode we need to reset multicarets to one caret, the caret must stay where the user expect it to be, stay where he moved it. whats seems to be simple becomes complex!
+        
+        Problem: When editing a word that appears N times, we have N carets. When user moves with arrow keys (up/down/left/right), ALL carets move together, and the carets list gets re-sorted by CudaText based on (y, x) position. When we reset multicaret to one caret we need to know which caret corresponds to the word the user originally clicked.
+        
+        Failed solutions (do not always work):
+        ======================================
+        
+        method1:
+        ========
+        
+        # Reset carets to the first caret (keep first caret position)
+        carets = ed_self.get_carets()
+        ed_self.set_caret(carets[0][0], carets[0][1], id=CARET_SET_ONE)
+        
+        Problem: caret jump to the top first ID which is not nice, when file is big the document scroll to the top
+
+        method2:
+        ========
+        
+        # use the position of the original word where the user clicked the first time
+        ed_self.set_caret(session.original[0], session.original[1], id=CARET_SET_ONE)
+        
+        Problem: when user moves caret with arrow keys (up/down), the caret stay on the edited word not the upper/bellow line, the user will think cudatext is buged because his caret did not move
+            
+        method3:
+        ========
+        
+        # Reset carets to single caret at the ORIGINAL position (where user first clicked)
+        # Find the caret that corresponds to the line where the user started editing,
+        # otherwise it defaults to carets[0] and jumps to the top of the file.
+        carets = ed_self.get_carets()
+        if carets:
+            final_x, final_y = carets[0][0], carets[0][1] # Default to first caret            
+            if session.original:
+                orig_y = session.original[1]
+                # Find the caret that is on the same line as the original click
+                # if user used up/down keyboard keys to move the caret we have to check also one line above (orig_y+1) and one line bellow (orig_y-1) the current line to get the wanted caret
+                for (cx, cy, _, _) in carets:
+                    if cy == orig_y or cy == orig_y+1 or cy == orig_y-1:
+                        final_x, final_y = cx, cy
+                        break
+            ed_self.set_caret(final_x, final_y, id=CARET_SET_ONE)
+            
+        Problem: this was working in all the cases until i found this bug:
+        here we are inside Edit mode and caret '|' is at the end of the second ccc
+          aaa  ccc
+          ccc|  aaa
+          aaa  ccc
+        
+        when we move the caret to the right, we exit Edit mode, so the above code reset the carets, but we get wrong caret positioning, the caret jumps to the start of the second line!
+          aaa  ccc
+        |  ccc  aaa
+          aaa  ccc
+        
+        this is just one example, but in this text example i found a lot of bugs with all positioning up/down/left/right, specially when one of the carets find the end of line. so we need another solution!
+
+        
+        method4: Best
+        =============
+        
+        Solution: Track the OCCURRENCE INDEX (which duplicate was clicked: 1st, 2nd, 3rd, etc).
+        
+        Example scenario:
+        -----------------
+          aaa  ccc    <- occurrence index 0 (first "ccc")
+          ccc  aaa    <- occurrence index 1 (second "ccc") <- USER CLICKS HERE
+          aaa  ccc    <- occurrence index 2 (third "ccc")
+        
+        When user clicks the middle "ccc":
+        1. We save original_occurrence_index = 1
+        2. We create 3 carets (one per "ccc"), sorted by position
+        3. Caret at index 1 in the sorted list corresponds to the middle "ccc"
+        
+        When user presses UP arrow:
+        - All 3 carets move up one line
+        - The carets list is re-sorted by CudaText: [line0_ccc, line1_ccc, line2_ccc]
+        - BUT: The caret that was at index 1 is STILL at index 1 in the sorted list
+        - Why? Because sorting by (y,x) preserves the relative order of word occurrences
+        
+        When user presses RIGHT arrow (moving into the space after "ccc"):
+        - All 3 carets move right (now in spaces, not in words)
+        - Carets are still sorted by (y,x)
+        - The caret at index 1 still corresponds to the middle occurrence
+        - That caret now has the updated x position (in the space)
+        
+        Result: By using carets[original_occurrence_index], we get the caret that moved
+        with the word the user originally clicked, with its current position after movements.
+        
+        How it is implemented:
+        ----------------------
+        In on_click, we find which occurrence index this clicked word is (e.g., 0 for first, 1 for second, 2 for third occurrence) and save it to original_occurrence_index. Then the rest of the code auto-refreshes this word's positioning while it is edited (via redraw()) and saves it to session.dictionary.
+        Both session.dictionary[our_key] (list of TokenRef objects) and carets (list of caret tuples) are sorted by (y, x) position. This creates a stable 1-to-1 mapping: the token at index N in the dictionary always corresponds to the caret at index N in the carets list, even when the user moves with arrow keys.
+        Therefore, in finish_editing, we use carets[original_occurrence_index] to get the caret that tracked the originally clicked word occurrence. This caret has moved with the user's arrow key presses and contains the correct final position where the single caret should land.
+        """
+        # Reset to single caret at the position corresponding to the originally clicked occurrence
         carets = ed_self.get_carets()
         if carets and session.original_occurrence_index is not None:
             # Carets are sorted by (y, x), same order as our dictionary tokens
             # The Nth occurrence corresponds to the Nth caret
             idx = session.original_occurrence_index
+            
+            # Safety check: Ensure the index is valid
+            # Why might idx >= len(carets)?
+            # ---------------------------------------------------------------
+            # Normally, this should NEVER happen because:
+            # - We create N carets for N occurrences when starting edit mode
+            # - Arrow key movements preserve all carets
+            # - on_caret is called BEFORE finish_editing, so carets still exist
+            # 
+            # However, this can happen in edge cases:
+            # 1. User manually deleted some carets
+            # 2. Some other plugin interfered with carets
+            # 3. Unexpected CudaText behavior or bug
+            # 4. The word was edited to become invalid (e.g., deleted completely) and some carets disappeared
+            # 
+            # In such cases, we fall back to carets[0] as a safe default rather than crashing.
+            # This ensures the plugin remains stable even in unexpected scenarios.
             if idx < len(carets):
+                # Normal case: Use the caret at the occurrence index
+                # This caret has moved with the user's arrow key presses and is at the correct position
                 final_x, final_y = carets[idx][0], carets[idx][1]
             else:
-                final_x, final_y = carets[0][0], carets[0][1]
+                if session.original:
+                    # Fallback case1: Use the position of the original word where the user clicked the first time
+                    final_x, final_y = session.original[0], session.original[1]
+                else:
+                    # Fallback case2: Use first caret (should rarely/never happen)
+                    # Better to land somewhere reasonable than to crash with IndexError
+                    final_x, final_y = carets[0][0], carets[0][1]
             
-            ed_self.set_caret(final_x, final_y, id=CARET_SET_ONE)
+            # Set single caret at the determined position
+            # This removes all other carets and places one caret at (final_x, final_y)
+            # CARET_OPTION_NO_SCROLL gave bad result, when carets are removed it seems that cudatext remembers the first top caret and when i set the caret here cudatext scroll to the first caret even when the caret is on my wanted position which i set here, but because of CARET_OPTION_NO_SCROLL cudatext will not scroll to my wanted position, what a strange bahvior
+            # ed_self.set_caret(final_x, final_y, id=CARET_SET_ONE, options=CARET_OPTION_NO_EVENT+CARET_OPTION_NO_SCROLL)
+            ed_self.set_caret(final_x, final_y, id=CARET_SET_ONE, options=CARET_OPTION_NO_EVENT)
 
         # Reset flags to 'View/Selection' mode
         session.selected = True
         session.editing = False
         session.our_key = None
         session.original = None
-        session.original_occurrence_index = None
+        session.original_occurrence_index = None  # Clear the tracked index
 
         # Re-paint markers so user can see what else to edit (ONLY VISIBLE VIEWPORT PORTION)
         if colorize:
@@ -1298,12 +1424,24 @@ class Command:
         session.editing = True
         session.our_key = clicked_key
         session.original = (clicked_x, clicked_y)
-        # Find which occurrence index this is (0-based)
+
+        # Find which occurrence index this clicked word is (0-based).
+        # Example: if "ccc" appears 3 times and user clicked the 2nd one, this will be index 1.
+        # This index is CRITICAL because it maps directly to the caret position in the sorted carets list.
+        # 
+        # Why this works:
+        # - session.dictionary[clicked_key] contains TokenRef objects sorted by (y, x) position
+        # - When we create multiple carets (in on_click), we sort them by (y, x) 
+        # - Therefore: dictionary index N corresponds to caret index N
+        # - If user clicks occurrence #1 (middle "ccc" in example), we save index=1
+        # - Later when user moves with arrows, ALL carets move together but maintain their relative order
+        # - Caret at index 1 always corresponds to the word occurrence at index 1, even after movements
+        # find more info about this in 'SOLVE THE CARET POSITIONING PROBLEM' in finish_editing()
         for i, token_ref in enumerate(session.dictionary[clicked_key]):
-            if token_ref.start_y == clicked_y:
+            if token_ref.start_y == clicked_y and token_ref.start_x <= clicked_x <= token_ref.end_x:
                 session.original_occurrence_index = i
                 break
-                
+
     def on_click_gutter(self, ed_self, _state, nline, _nband):
         """
         Handles clicks on the gutter area.
