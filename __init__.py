@@ -1317,8 +1317,13 @@ class Command:
 
         # 4. Check if this is a valid word match
         match = session.regex_identifier.match(line_text[actual_start_x:])
+        
+        # SPECIAL CASE: If no match but caret is near the original token position
         if not match:
-            return False
+            # Use token.text length (the TRUE current length) not session.our_key
+            old_length = len(token_ref.text)
+            within_range = abs(x0 - token_ref.start_x) <= max(old_length + 10, 20)
+            return within_range
             
         current_word = match.group(0)
         current_word_len = len(current_word)
@@ -1334,7 +1339,8 @@ class Command:
         
         # Calculate Delta (How much did the word grow/shrink?)
         # We compare current word on screen vs the original key we started editing
-        delta = current_word_len - len(session.our_key)
+        # Use token.text (the TRUE current state) for drift calculation
+        delta = current_word_len - len(token_ref.text)
         
         # Count how many instances of 'our_key' are strictly BEFORE this one on the same line.
         # This tells us how many times 'delta' was applied before reaching us.
@@ -1955,23 +1961,25 @@ class Command:
         
         if not match:
             # Word was deleted completely
-            session.our_key = old_key
-            ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
-            
-            # === PROFILING STOP: REDRAW (Exit Early 2) ===
-            if ENABLE_PROFILING_inside_redraw:
-                stop_profiling(pr_redraw, s_redraw, sort_key='cumulative', title='PROFILE: redraw (Live Typing - Exit Early 2)')
-            # ===========================================
+            new_key = ''
+            new_length = 0
+        else:
+            new_key = match.group(0)
+            if not session.case_sensitive:
+                new_key = new_key.lower()
+            new_length = len(new_key)
+
+        # 2. Get tokens first (we need them to calculate old_length correctly!)
+        edited_tokens = session.dictionary.get(old_key, [])
+        if not edited_tokens:
             return
 
-        # Extract the new word from the match
-        new_key = match.group(0)
-        if not session.case_sensitive:
-            new_key = new_key.lower()
-
-        # 2. Calculate Length Delta change
-        old_length = len(old_key)
-        new_length = len(new_key)
+        # CRITICAL FIX: Get old_length from the actual token, not from the key!
+        # The token.text reflects the TRUE current state (can be empty "")
+        # This fixes the delta calculation when transitioning from empty to letter
+        old_length = len(edited_tokens[0].text) if edited_tokens else 0
+        
+        # Calculate Length Delta change
         delta = new_length - old_length
 
         # Early exit if nothing changed
@@ -1985,11 +1993,6 @@ class Command:
             # ==========================================
             return
 
-        # Get all instances of edited word
-        edited_tokens = session.dictionary.get(old_key, [])
-        if not edited_tokens:
-            return
-
         # Identify lines affected by this edit (where this word appears)
         affected_lines = set()
         for token_ref in edited_tokens:
@@ -2001,23 +2004,28 @@ class Command:
             line_num = token_ref.start_y
             old_token_x = token_ref.start_x
             
-            # Find new position (may have shifted due to earlier edits on same line)
-            y_line = ed_self.get_text_line(line_num)
-            
-            # Scan backwards to find start of the new word instance from the adjusted position
-            # here we search for the token starting from its old position
-            search_x = old_token_x
-            while search_x >= 0 and session.regex_identifier.match(y_line[search_x:]):
-                search_x -= 1
-            search_x += 1
-            # Workaround for EOL #65
-            if search_x < 0:
-                search_x = 0
-            
-            # Update this token's position in-place
-            token_ref.start_x = search_x
-            token_ref.end_x = search_x + new_length
-            token_ref.text = new_key
+            if new_length == 0:
+                # Word deleted - keep position but zero length
+                token_ref.end_x = token_ref.start_x
+                token_ref.text = ''
+            else:
+                # Find new position (may have shifted due to earlier edits on same line)
+                y_line = ed_self.get_text_line(line_num)
+                
+                # Scan backwards to find start of the new word instance from the adjusted position
+                # here we search for the token starting from its old position
+                search_x = old_token_x
+                while search_x >= 0 and session.regex_identifier.match(y_line[search_x:]):
+                    search_x -= 1
+                search_x += 1
+                # Workaround for EOL #65
+                if search_x < 0:
+                    search_x = 0
+                
+                # Update this token's position in-place
+                token_ref.start_x = search_x
+                token_ref.end_x = search_x + new_length
+                token_ref.text = new_key
             
             # Shift other tokens on this line that come AFTER this token
             # Only process tokens on the same line (using spatial index)
@@ -2062,7 +2070,9 @@ class Command:
         '''
         
         # 4. met2: Update dictionary keys if word changed, and do not handle collisions (when we edit a word and create a new word that already existed before we simply disable the old one, then user will have to restart sync edit session to include the diabled word), i found this safer because we should not fix user bugs, if user do not pay attention that he created a new word that already exist then why should we fix it for him? this is not a bug fixer plugin! so here we will simply consider the old word (which is similar to the new word) as a dead word so we do not colorize/edit it, this is safer.
-        if old_key != new_key:
+        # Update dictionary keys if word changed (and is not empty)
+        if new_key != '' and old_key != new_key:
+            # Word changed to a different non-empty word
             session.dictionary[new_key] = edited_tokens
             del session.dictionary[old_key]
             
@@ -2076,11 +2086,20 @@ class Command:
             
             session.our_key = new_key
         else:
+            # Word is empty or unchanged - keep using old_key
+            # Even if text is empty, we keep the dictionary entry under old_key
             session.our_key = old_key
             
             
         # 5. Repaint borders ONLY FOR VISIBLE VIEWPORT PORTION
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
+
+        if new_length == 0:
+            if ENABLE_PROFILING_inside_redraw:
+                stop_profiling(pr_redraw, s_redraw, sort_key='time', title='PROFILE: redraw (Empty)')
+            if ENABLE_BENCH_TIMER:
+                print(f"REDRAW (EMPTY): {time.perf_counter() - t0:.4f}s")
+            return
 
         # Get visible line range
         line_top, line_bottom = self.get_visible_line_range(ed_self)
@@ -2088,7 +2107,7 @@ class Command:
         # Collect all markers to add, sorted by (y, x)
         # Collect markers only for visible lines
         markers_to_add = []
-        for token_ref in session.dictionary[session.our_key]:
+        for token_ref in edited_tokens:
             # OPTIMIZATION: Only add markers for the visible lines of the VIEWPORT
             if line_top <= token_ref.start_y <= line_bottom:
                 markers_to_add.append((
