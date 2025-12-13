@@ -1211,22 +1211,24 @@ class Command:
         if y0 != original_token.start_y:
             return False
         
-        # Check if caret is within the current boundaries of the original token
-        # This accounts for the token growing/shrinking during typing
+        # Get current line text for regex checking
+        current_line = ed_self.get_text_line(y0)
+        
+        # First priority: Check the dynamically growing/shrinking word boundaries
+        # This is crucial for handling typing in the middle or at the end
+        if session.regex_identifier and original_token.start_x <= len(current_line):
+            match = session.regex_identifier.match(current_line[original_token.start_x:])
+            if match:
+                # The match tells us the current actual word at this position (after typing)
+                matched_end = original_token.start_x + len(match.group(0))
+                # Allow caret to be anywhere within or at the end of the dynamically matched word
+                if x0 >= original_token.start_x and x0 <= matched_end:
+                    return True
+        
+        # Fallback: Check if caret is within the stored token boundaries
+        # This handles cases where regex might not match (e.g., word being deleted)
         if x0 >= original_token.start_x and x0 <= original_token.end_x:
             return True
-        
-        # Special case: Allow caret to be ONE position past the end (for continued typing)
-        # But verify with regex that we're actually at the end of a valid identifier
-        if x0 == original_token.end_x + 1 and session.regex_identifier:
-            current_line = ed_self.get_text_line(y0)
-            if original_token.start_x <= len(current_line):
-                match = session.regex_identifier.match(current_line[original_token.start_x:])
-                if match:
-                    # Verify the match ends exactly where we are
-                    matched_end = original_token.start_x + len(match.group(0))
-                    if x0 <= matched_end:
-                        return True
         
         return False
 
@@ -1523,7 +1525,10 @@ class Command:
                 return
                 
             caret = carets[0]
-            clicked_x, clicked_y = caret[0], caret[1]
+            # clicked_x, clicked_y = caret[0], caret[1]
+            clicked_x, clicked_y = session.original[0], session.original[1]
+            print("caret[0], caret[1]",caret[0], caret[1])
+            print("session.original",session.original[0], session.original[1])
 
             # Check if caret is on a valid ID
             # Use line index for fast lookup
