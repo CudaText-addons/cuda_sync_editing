@@ -257,16 +257,18 @@ class Command:
         self.pending_delay_handles = set() # Track editors waiting for the 600ms lexer delay timer
         self.pending_lexer_parse_handles = set()  # Track editors waiting for lexer parsing notification
         self.active_scroll_handles = set() # Track editors with active sync sessions (for on_scroll event)
+        self.active_caret_handles = set() # Track editors with active sync sessions (for on_caret event)
 
     def _update_event_subscriptions(self):
         """
         central event subscription management method
         Central method to manage all dynamic event subscriptions.
-        Coordinates on_lexer_parsed and on_scroll based on current plugin state.
+        Coordinates on_lexer_parsed, on_scroll, and on_caret based on current plugin state.
         
         This ensures:
         - on_lexer_parsed is active when editors are waiting for lexer parsing
         - on_scroll is active when editors have active sync sessions
+        - on_caret is active when editors have active sync sessions
         - Events are properly combined and don't conflict
         
         this necesary for now, once PROC_GET_EVENTS https://github.com/Alexey-T/CudaText/issues/6138 is implemented this can be simplified 
@@ -281,6 +283,10 @@ class Command:
         if self.active_scroll_handles:
             events_needed.append('on_scroll')
         
+        # Add on_caret if any editor has an active sync session
+        if self.active_caret_handles:
+            events_needed.append('on_caret')
+            
         # Update subscriptions (preserves install.inf events)
         set_events_safely(events_needed)
 
@@ -485,7 +491,7 @@ class Command:
         All configuration is read fresh from file/theme on every start so the user does not need to restart CudaText.
         """
         session = self.get_session(ed_self)
-
+        
         # now that we created a session we should always call update_gutter_icon_on_selection before start_sync_edit to set gutter_icon_line (set by show_gutter_icon) which will be used in start_sync_edit to set the active gutter icon
         # Update gutter icon before starting to ensure session.gutter_icon_line is set. This allows us to flip it to "Active" mode shortly after.
         self.update_gutter_icon_on_selection(ed_self)
@@ -682,6 +688,7 @@ class Command:
             if not tokenlist:
                 # here we cannot simply call self.reset(ed_self) because it will remove on_lexer_parsed event, and this is not always wanted, for example if the user clicked the gutter icon to activate sync edit mode on a big file, cudatext will take some time to finish lexer token parsing so tokenlist will be empty because get_token(TOKEN_LIST_SUB returns nothing, in this case if we call self.reset(ed_self) we will reset on_lexer_parsed and when cudatext finishes its tokens parsing the user will not receive the alert to restart the sync edit session and will think that the plugin is bugged or that his document have no duplicates. so here we must reset but use cleanup_lexer_events=False arg to prevent removing on_lexer_parsed. but this means also that on_lexer_parsed will keep active if the file is small because cudatext send on_lexer_parsed event only if parsing take more than 600ms, so in this case on_lexer_parsed will not be reset so when the user open another big file he will receive on_lexer_parsed, but this is not bad because in on_lexer_parsed() function we check if the editor is registred to receive on_lexer_parsed event, so it is safe to leave on_lexer_parsed active
                 self.reset(ed_self, cleanup_lexer_events=False)
+                # self.reset(ed_self)
                 msg_status(_('Sync Editing: No syntax tokens found, or Lexer Parsing not finished yet...'))
                 if SHOW_PROGRESS: self.set_progress(-1)
                 restore_caret()
@@ -812,6 +819,8 @@ class Command:
         # Subscribe to on_scroll event for this editor
         handle = self.get_editor_handle(ed_self)
         self.active_scroll_handles.add(handle)
+        # Subscribe to on_caret event for live editing updates
+        self.active_caret_handles.add(handle)
         self._update_event_subscriptions()
         
         # restore caret but w/o selection
@@ -965,15 +974,16 @@ class Command:
         Args:
             - ed_self: Editor instance
             - cleanup_lexer_events: If True, clean up lexer event subscriptions. If False, keep lexer events active (used during lexer parsing delay where we need events to persist).
-            NOTE: Scroll events are ALWAYS cleaned up regardless.
+            NOTE: Scroll and caret events are ALWAYS cleaned up regardless.
         """
         if ed_self is None:
             ed_self = ed
         session = self.get_session(ed_self)
         handle = self.get_editor_handle(ed_self)
         
-        # ALWAYS clean up scroll tracking (session is ending)
+        # ALWAYS clean up scroll and caret tracking (session is ending)
         self.active_scroll_handles.discard(handle)
+        self.active_caret_handles.discard(handle)
         
         # Clean up lexer parsing tracking only if requested
         if cleanup_lexer_events:
@@ -984,7 +994,7 @@ class Command:
             self.pending_lexer_parse_handles.discard(handle)
             
         # Update event subscriptions
-        # here we unsubscribe from on_lexer_parsed if no more editors are waiting, and on_scroll if no other editor need it
+        # here we unsubscribe from on_lexer_parsed if no more editors are waiting, on_scroll if no other editor need it, and on_caret if no other editor needs it
         self._update_event_subscriptions()
     
         # Restore original position if needed
@@ -1172,23 +1182,34 @@ class Command:
                     self.start_sync_edit(ed_self, allow_timer=True)
                 return False  # Prevent default processing
 
+    def on_caret_slow(self, ed_self):
+        """
+        Called when caret stops moving (debounced caret event).
+        Handles gutter icon visibility based on selection state.
+        Only active when NOT in sync edit mode (lightweight).
+        """
+        # Only handle gutter icon when NOT in active sync edit mode
+        if not self.has_session(ed_self):
+            self.update_gutter_icon_on_selection(ed_self)
+            return
+
+
     def on_caret(self, ed_self):
     # on_caret_slow is better because it will consume less resources but it breaks the colors recalculations when user edit an ID, so stick with on_caret
         """
-        Hooks into caret movement.
+        Hooks into caret movement during active sync editing session.
         Continuous Edit Logic:
         If the user moves the caret OUTSIDE the active word, we do NOT exit immediately.
         We check if the landing spot is another valid ID.
         - If landing on valid ID: Do nothing (let on_click handle the switch seamlessy).
         - If landing elsewhere: We 'finish' the edit, return to Selection mode, and show colors.
-
-        Also handles showing/hiding gutter icon based on selection state.
+        
+        NOTE: This event is ONLY subscribed during active sync sessions (dynamically).
         """
         # OPTIMIZATION: exit early if sync edit mode is not active
-        if not self.has_session(ed_self):
-            # Only show/hide gutter icon when NOT in sync edit mode
-            self.update_gutter_icon_on_selection(ed_self)
-            return
+        # This should never happen since we only subscribe when active
+        # if not self.has_session(ed_self):
+            # return
         
         # === PROFILING START: ON_CARET ===
         if ENABLE_PROFILING_inside_on_caret:
@@ -1585,6 +1606,8 @@ class Command:
 
     def config(self):
         """Opens the plugin configuration INI file."""
+        print("self.sessions",self.sessions)
+        print("self.pending_lexer_parse_handles",self.pending_lexer_parse_handles)
         try:
             ini_config = PluginConfig()
             file_open(ini_config.file_path)
