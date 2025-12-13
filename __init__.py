@@ -1129,7 +1129,6 @@ class Command:
         """
         # Reset to single caret at the position corresponding to the originally clicked occurrence
         carets = ed_self.get_carets()
-        print("reset carets",carets)
         if carets and session.original_occurrence_index is not None:
             # Carets are sorted by (y, x), same order as our dictionary tokens
             # The Nth occurrence corresponds to the Nth caret
@@ -1155,17 +1154,10 @@ class Command:
                 # Normal case: Use the caret at the occurrence index
                 # This caret has moved with the user's arrow key presses and is at the correct position
                 final_x, final_y = carets[idx][0], carets[idx][1]
-                print("reset carets final_x, final_y, idx",final_x, final_y, idx)
             else:
-                # if session.original:
-                    # Fallback case1: Use the position of the original word where the user clicked the first time
-                    # final_x, final_y = session.original[0], session.original[1]
-                # else:
-                    # Fallback case2: Use first caret (should rarely/never happen)
-                    # Better to land somewhere reasonable than to crash with IndexError
-                    # final_x, final_y = carets[0][0], carets[0][1]
+                # Fallback case: Use first caret (should rarely/never happen)
+                # Better to land somewhere reasonable than to crash with IndexError
                 final_x, final_y = carets[0][0], carets[0][1]
-                print("reset carets carets[0]",final_x, final_y)
 
             
             # Set single caret at the determined position
@@ -1372,7 +1364,6 @@ class Command:
 
         caret = carets[0]
         clicked_x, clicked_y = caret[0], caret[1]
-        print("===========on_click========start",clicked_x, clicked_y)
 
         # Find which word was clicked (fast O(1) lookup via line_index)
         clicked_key = None
@@ -1436,7 +1427,6 @@ class Command:
         markers_to_add = []
         
         for token_ref in session.dictionary[clicked_key]:
-            print("token_ref.start_y",token_ref.start_y,token_ref.start_x)
             # Add caret to ALL instances (editing must work on all words)
             all_carets.append((
                 token_ref.start_y,  # y
@@ -1455,9 +1445,6 @@ class Command:
         # Sort both lists by (y, x), sorting is very important, read in redraw() why
         all_carets.sort(key=lambda c: (c[0], c[1]))
         markers_to_add.sort(key=lambda m: (m[0], m[1]))
-        
-        for ccc in all_carets:
-            print("ccc",ccc[0],ccc[1])
             
         # Add active borders ONLY to visible VIEWPORT instances of the clicked word
         for y, x, length in markers_to_add:
@@ -1507,10 +1494,8 @@ class Command:
         # - Later when user moves with arrows, ALL carets move together but maintain their relative order
         # - Caret at index 1 always corresponds to the word occurrence at index 1, even after movements
         # find more info about this in 'SOLVE THE CARET POSITIONING PROBLEM' in finish_editing()
-        print("on_click",clicked_y,clicked_x)
         for i, token_ref in enumerate(session.dictionary[clicked_key]):
             if token_ref.start_y == clicked_y and token_ref.start_x <= clicked_x <= token_ref.end_x:
-                print("on_click token_ref.start_x y",token_ref.start_y,token_ref.start_x,i)
                 session.original_occurrence_index = i
                 break
 
@@ -1554,17 +1539,16 @@ class Command:
     # on_caret_slow is better because it will consume less resources but it breaks the colors recalculations when user edit an ID, so stick with on_caret
         """
         Hooks into caret movement during active sync editing session.
-        includes integrity checking to detect when CudaText removes carets.
         
         Continuous Edit Logic:
-        If the user moves the caret OUTSIDE the active word, we do NOT exit immediately.
-        We check if the landing spot is another valid ID.
-        - If landing on valid ID: Do nothing (let on_click handle the switch seamlessly).
-        - If landing elsewhere: We 'finish' the edit, return to Selection mode, and show colors.
+        If the user moves the caret OUTSIDE the active word, we 'finish' the edit, return to View/Selection mode, and show colors.
         
         Includes INTEGRITY CHECK to detect and exit if caret integrity is compromised (carets removed or moved to different lines).
         
         NOTE: This event is ONLY subscribed during active sync sessions (dynamically).
+        
+        Here we handle only carets events from keyboard movements left/right. up/down are blocked in on_key. carets events made by mouse clicks are handeled in on_click.
+        Here we handle only Sync Edit Mode, Sync View/Selection Mode is handeled in on_click
         """
         # OPTIMIZATION: exit early if sync edit mode is not active
         # This should never happen since we only subscribe when active, but when sync edit is active in one tab then we must prevent this to run on other tabs if the user switch to another tab, otherwise we will create a session for every tab the user switch to it and of course will add overhead also, so we must keep this check
@@ -1572,153 +1556,43 @@ class Command:
         if handle not in self.sessions: # inline has_session
             return
 
-        # Now we know sync edit is active, get session and exit early if we are not in editing mode, view/selection mode should not be processed here (by on_caret) we do it in on_click
+        # Now we know that this document have a session active, get the session and exit early if we are not in editing mode, view/selection mode should not be processed here (by on_caret) we do it in on_click
         session = self.sessions[handle]
         if not session.editing:
             return
-        
+       
+        # Check if this is a Mouse Action (Left or Right Button is pressed), mouse clicks must be handeleted in view/selection mode, we check it here because on_caret events come always before on_click events, so we have to discard those false events here, we are interested about keyboard carets movements only
+        pressed_keys = app_proc(PROC_GET_KEYSTATE, '')
+        is_mouse_click = ('L' in pressed_keys) or ('R' in pressed_keys)                    
+        if is_mouse_click:
+            return
+
         # Check caret integrity FIRST: Detect if carets were lost or jumped to another line
         if not self._validate_carets_integrity(ed_self):
-            msg_status(_("Caret integrity compromised (carets removed or moved to different lines) - exiting Sync Edit Mode"))
-            self.finish_editing(ed_self)
+            msg_status(_("Carets removed or moved to different lines - exiting Sync Edit Mode"))
+            # exit Edit mode
+            self.finish_editing(ed_self, colorize=True)
             return
         
-        # Now we are in Editing mode, and caret moved with keyboard or mouse, lets check if caret is still inside the edited word
-        if not self.caret_in_current_token(ed_self): # caret moved, are we still inside the word currently being edited?
-            # Caret left current token - check if it's on another valid ID
+        # === PROFILING START: ON_CARET ===
+        if ENABLE_PROFILING_inside_on_caret:
+            pr_on_caret, s_on_caret = start_profiling()
+        # =================================
+        
+        # Now we are in Editing mode, and caret moved with keyboard and carets are in a good state, lets check if caret is still inside the edited word
+        if not self.caret_in_current_token(ed_self):
+            # Caret left current token
+            self.finish_editing(ed_self)
             
-            # === PROFILING START: ON_CARET ===
-            if ENABLE_PROFILING_inside_on_caret:
-                pr_on_caret, s_on_caret = start_profiling()
-            # =================================
-            
-            carets = ed_self.get_carets()
-            if not carets:
-                self.finish_editing(ed_self)
-                return
-
-            '''
-            Why NOT to use session.original:
-            session.original stores the coordinates of where the user first clicked to start editing. It is a static position from the past. The on_caret event fires when the user moves the cursor to a new position. so this position is now stale after the user moved with arrow keys. Using stale coordinates would check the wrong location for valid IDs
-            '''
-            # clicked_x, clicked_y = session.original[0], session.original[1]
-
-            '''
-            Why carets[0] is risky:
-            If the user edits a word that appears 10 times, and they are looking at the 5th occurrence (middle of screen).
-            carets[0] checks the 1st occurrence (top of file).
-            If the text surrounding the 1st occurrence is different from the 5th, carets[0] might land on empty space while the user's caret lands on a valid word (or vice versa).
-            This causes "ghost" behavior where the plugin thinks you didn't land on a word even though you clearly see your cursor on one.
-            '''
-            # clicked_x, clicked_y = carets[0][0], carets[0][1]
-
-            print("carets",carets)
-            # Use the stored index to find the specific caret the user is tracking.
-            # Fallback to 0 if the index is somehow invalid (safety).
-            idx = session.original_occurrence_index
-            if idx is not None and idx < len(carets):
-                print("using original_occurrence_index",idx)
-                clicked_x, clicked_y = carets[idx][0], carets[idx][1]
-            else:
-                # Fallback to first caret if something went wrong
-                print("using carets[0]")
-                clicked_x, clicked_y = carets[0][0], carets[0][1]
-
-            # clicked_x, clicked_y = session.original[0], session.original[1]
-            
-            print("on_caret caret outside id clicked_x, clicked_y",clicked_x, clicked_y)
-            
-            # Check if caret is on a valid ID (ID to ID switch logic)
-            # Use line index for fast lookup
-            clicked_key = None
-            if clicked_y in session.line_index:
-                for token_ref, key in session.line_index[clicked_y]:
-                    if clicked_x >= token_ref.start_x and clicked_x <= token_ref.end_x:
-                        print("token_ref.start_x end_x",token_ref.start_x,token_ref.end_x)
-                        print("clicked_x",clicked_x)
-                        clicked_key = key
-                        break
-
-            print("===clicked_key",clicked_key)
-            if not clicked_key:
-                print("not clicked_key")
-                # caret is NOT on a valid ID, finish editing mode and show colors (return to selection/view mode)
-                self.finish_editing(ed_self)
-            # elif clicked_key != session.our_key:
-            else:
-                print("ID to ID switch")
-                # ID to ID switch: caret is on a valid ID: 
-                # how can this happen? this happen only when user do direct click or 
-                # move caret with keyoard down/up keys and caret lands on another valid but
-                # different ID, like:
-                    # aaa ccc
-                    # ccc aaa  
-                    # if caret is on aaa and user move down the caret to ccc
-                # this will never happen when caret move by keyboard to left or right because two Id can never be adyacent without a non id like space..etc between them, in this case we will always return to Selection/View mode
-                # _____
-                # so now, should we continue in Editing mode and mark the new ID or should we return to Selection/View Mode and colorise all?
-                    # 1. if the caret movement was made by a mouse click, we must continue in Editing mode
-                    # 2. if the caret movement was made by the keyboard left/right arrows, i do not
-                    #    know what to choose:
-                        # A. continue in Editing mode like with mouse click
-                        # B. return to Selection/View mode and show colors, then the user 
-                        #    must click explicitly on an ID to enter in Edit mode again
-                    
-                # ====== METHOD1: ======
-                # choose 2.B. 
-                # i have to see if this caret movement was made by 
-                # a mouse click or keybord arrows, the problem is that we cannot 
-                # reliably distinguish keyboard from mouse click in on_caret event
-                # https://github.com/CudaText-addons/cuda_sync_editing/issues/7
-                # i have to use app_proc(PROC_GET_KEYSTATE and check for L (left click), 
-                # but i do not like it because:
-                    # 1. we already have problem of performance with big files, 
-                    #    and this solution will add more overhead
-                    # 2. if user use right click to do the clicks this will fail i think, 
-                    #    and if i check for left and right clicks then how can i know if 
-                    #    it was a desired click and not a context menu click? i don t know 
-                    #    with the current api, but in my tests it works fine for now
-                    
-                # ====== METHOD2: ======
-                # if i choose 2.A. (continue in Editing mode like with mouse click) then 
-                # things are easier, because we do not have to see if this caret movement 
-                # was made by a mouse click or keybord arrows.
-                # so we do nothing - we let on_click handle the transition. but this is 
-                # keyboard caret movement so on_click will not be called so we have to 
-                # invoke it manually with doclick()
-                
-                # i prefer METHOD2 its cleaner and safer, but if users ask for METHOD1 then
-                # the code is ready already
-                # use_METHOD1=False
-                use_METHOD1=True
-                
-                if use_METHOD1:
-                    # Check if this is a Mouse Action (Left or Right Button is pressed)
-                    pressed_keys = app_proc(PROC_GET_KEYSTATE, '')
-                    # print("pressed_keys",pressed_keys)
-                    is_mouse_click = ('L' in pressed_keys) or ('R' in pressed_keys)                    
-                    if is_mouse_click:
-                        # we used the MOUSE to switch to another ID, we assume the user 
-                        # might be clicking it to edit, so we do nothing, we let on_click handle it.
-                        pass
-                    else:
-                        # we used the KEYBOARD, return to Selection/View mode and show colors.
-                        print("========method1")
-                        self.finish_editing(ed_self, colorize=True)
-                else: # use METHOD2
-                    self.doclick()
-                
-
-            # === PROFILING STOP: ON_CARET (Exit Editing) ===
-            if ENABLE_PROFILING_inside_on_caret:
-                stop_profiling(pr_on_caret, s_on_caret, sort_key='cumulative', title='PROFILE: on_caret (Exit Editing)')
-            # ===============================================
-            
-        else: # caret moved, and it is still inside the word currently being edited
-            # NOTE: self.redraw(ed_self) is called here to update word markers live during typing.
-            # This recalculates borders and shifts other tokens on the line as the word grows/shrinks. This is a performance hit on simple caret moves (arrow keys) but necessary for live updates.
+        else:
+            # caret moved, and it is still inside the word currently being edited
+            # NOTE: self.redraw(ed_self) is called here to update word markers live during typing. This recalculates borders and shifts other tokens on the line as the word grows/shrinks. This is a performance hit on simple caret moves (arrow keys) but necessary for live updates.
             self.redraw(ed_self)
-            print("on_caret redraw")
+            
+        # === PROFILING STOP: ON_CARET (Exit Editing) ===
+        if ENABLE_PROFILING_inside_on_caret:
+            stop_profiling(pr_on_caret, s_on_caret, sort_key='cumulative', title='PROFILE: on_caret (Exit Editing)')
+        # ===============================================
 
     def _validate_carets_integrity(self, ed_self):
         """
