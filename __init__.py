@@ -308,6 +308,7 @@ class Command:
         self.active_scroll_handles = set() # Track editors with active sync sessions (for on_scroll event)
         self.active_caret_handles = set() # Track editors with active sync sessions (for on_caret event)
         self.lexer_parsed_message_shown = set() # Track editors that already showed the message box
+        self.selection_scroll_handles = set() # Track editors with selections but NO active session (for on_scroll event)
 
     def _update_event_subscriptions(self):
         """
@@ -317,7 +318,7 @@ class Command:
         
         This ensures:
         - on_lexer_parsed is active when editors are waiting for lexer parsing
-        - on_scroll is active when editors have active sync sessions
+        - on_scroll is active when editors have active sync sessions OR have selections
         - on_caret is active when editors have active sync sessions
         - Events are properly combined and don't conflict
         
@@ -329,8 +330,8 @@ class Command:
         if self.pending_lexer_parse_handles:
             events_needed.append('on_lexer_parsed')
         
-        # Add on_scroll if any editor has an active sync session
-        if self.active_scroll_handles:
+        # Add on_scroll if any editor has an active sync session OR has a selection
+        if self.active_scroll_handles or self.selection_scroll_handles:
             events_needed.append('on_scroll')
         
         # Add on_caret if any editor has an active sync session
@@ -386,6 +387,10 @@ class Command:
         if handle in self.inited_icon_eds:
             # print('Sync Editing: Forget handle')
             self.inited_icon_eds.remove(handle)
+        
+        # Clean up selection scroll tracking before reset
+        self.selection_scroll_handles.discard(handle)
+        
         self.reset(ed_self, cleanup_lexer_events=True)
 
     def on_open_reopen(self, ed_self):
@@ -423,30 +428,43 @@ class Command:
     def update_gutter_icon_on_selection(self, ed_self):
         """
         Called when selection changes (via on_caret).
-        Shows gutter icon if there's a valid selection, hides it otherwise.
+        Shows gutter icon at the best visible line if there's a valid selection.
+        Icon follows the viewport when scrolling through selection.
+        Manages on_scroll subscription for selection tracking (separate from sync edit sessions).
         """
         self.load_gutter_icons(ed_self)
-
-        carets = ed_self.get_carets()
-        if len(carets) != 1: # Don't support multi-carets
-            self.hide_gutter_icon(ed_self)
-            return
-
-        # Check if we have a selection
-        x0, y0, x1, y1 = carets[0]
-        if y1 >= 0 and (y0 != y1 or x0 != x1):  # Has selection
-            # Show icon at the last line of selection
-            last_line = max(y0, y1)
-            self.show_gutter_icon(ed_self, last_line)
+        
+        handle = self.get_editor_handle(ed_self)
+        
+        # Get the best line to show icon (viewport-aware)
+        icon_line = self.get_visible_selection_line(ed_self)
+        
+        if icon_line is not None:
+            # Show icon at the calculated line
+            self.show_gutter_icon(ed_self, icon_line)
+            
+            # Subscribe to on_scroll for this editor if NOT already in a sync edit session
+            # This allows icon to follow viewport during scrolling
+            if not self.has_session(ed_self):
+                if handle not in self.selection_scroll_handles:
+                    self.selection_scroll_handles.add(handle)
+                    self._update_event_subscriptions()
         else:
             # No selection, hide icon if not in active sync edit mode
-            # (If we are editing, we keep the icon logic managed by start_sync_edit)
             if self.has_session(ed_self):
                 session = self.get_session(ed_self)
                 if not session.selected and not session.editing:
                     self.hide_gutter_icon(ed_self)
+                    # Unsubscribe from selection scroll tracking
+                    if handle in self.selection_scroll_handles:
+                        self.selection_scroll_handles.remove(handle)
+                        self._update_event_subscriptions()
             else:
                 self.hide_gutter_icon(ed_self)
+                # Unsubscribe from selection scroll tracking
+                if handle in self.selection_scroll_handles:
+                    self.selection_scroll_handles.remove(handle)
+                    self._update_event_subscriptions()
 
     def toggle(self, ed_self=None):
         """
@@ -472,6 +490,31 @@ class Command:
         line_top = ed_self.get_prop(PROP_LINE_TOP)
         line_bottom = ed_self.get_prop(PROP_LINE_BOTTOM)
         return (line_top, line_bottom)
+
+    def get_visible_selection_line(self, ed_self):
+        """
+        Returns the middle line of the visible viewport if there's a valid selection.
+        The icon always appears in the center of the screen as long as there's a selection,
+        even if the selection itself is not visible in the viewport.
+        Returns None if no valid selection exists.
+        """
+        carets = ed_self.get_carets()
+        if len(carets) != 1:
+            return None
+        
+        x0, y0, x1, y1 = carets[0]
+        # Check if we have a selection
+        if y1 < 0 or (y0 == y1 and x0 == x1):
+            return None
+        
+        # Get visible viewport range
+        line_top = ed_self.get_prop(PROP_LINE_TOP)
+        line_bottom = ed_self.get_prop(PROP_LINE_BOTTOM)
+        
+        # Always return middle line of viewport when there's a selection
+        middle_line = (line_top + line_bottom) // 2
+        
+        return middle_line
 
     def on_lexer_parsed(self, ed_self):
         """
@@ -549,6 +592,13 @@ class Command:
         """
         session = self.get_session(ed_self)
         
+        # Clean up selection scroll tracking since we're starting a sync session
+        handle = self.get_editor_handle(ed_self)
+        if handle in self.selection_scroll_handles:
+            self.selection_scroll_handles.remove(handle)
+            self._update_event_subscriptions()
+            
+            
         # now that we created a session we should always call update_gutter_icon_on_selection before start_sync_edit to set gutter_icon_line (set by show_gutter_icon) which will be used in start_sync_edit to set the active gutter icon
         # Update gutter icon before starting to ensure session.gutter_icon_line is set. This allows us to flip it to "Active" mode shortly after.
         self.update_gutter_icon_on_selection(ed_self)
@@ -1042,6 +1092,9 @@ class Command:
         self.active_scroll_handles.discard(handle)
         self.active_caret_handles.discard(handle)
         
+        # Also clean up selection scroll tracking
+        self.selection_scroll_handles.discard(handle)
+        
         # Clean up lexer parsing tracking only if requested
         if cleanup_lexer_events:
             # Clean up any pending lexer timers
@@ -1323,10 +1376,21 @@ class Command:
     def on_scroll(self, ed_self):
         """
         Called when user scrolls the editor viewport.
-        Updates markers to show only visible portions. This enables smooth scrolling with large files.
-        Uses a timer to debounce scroll events - only updates markers when scrolling stops (reduces CPU usage and makes scroll smooth).
+        
+        Handles two separate cases:
+        1. Selection mode (NOT in sync edit): Updates gutter icon position to middle of viewport
+        2. Sync edit mode: Updates markers to show only visible portions (debounced)
+          Updates markers to show only visible portions. This enables smooth scrolling with large files.
+          Uses a timer to debounce scroll events - only updates markers when scrolling stops (reduces CPU usage and makes scroll smooth).
         """
-        # OPTIMIZATION: exit early if sync edit mode is not active
+        handle = self.get_editor_handle(ed_self)
+        
+        # Case 1: Editor has selection but NO active session - update icon position immediately
+        if handle in self.selection_scroll_handles:
+            self.update_gutter_icon_on_selection(ed_self)
+            return
+        
+        # Case 2: Editor has active sync edit session - handle marker updates
         if not self.has_session(ed_self):
             return
         
@@ -1335,19 +1399,17 @@ class Command:
         if not (session.selected or session.editing):
             return
       
-        # Get editor handle to use as timer tag key
-        editor_handle = self.get_editor_handle(ed_self)
-        
         # Stop any existing scroll timer for this editor
-        timer_proc(TIMER_STOP, self._on_scroll_timer_finished, interval=0, tag=str(editor_handle))
+        timer_proc(TIMER_STOP, self._on_scroll_timer_finished, interval=0, tag=str(handle))
         
         # Start a new timer that will fire when scrolling stops (150ms delay)
-        timer_proc(TIMER_START_ONE, self._on_scroll_timer_finished, interval=SCROLL_DEBOUNCE_DELAY, tag=str(editor_handle))
+        timer_proc(TIMER_START_ONE, self._on_scroll_timer_finished, interval=SCROLL_DEBOUNCE_DELAY, tag=str(handle))
 
     def _on_scroll_timer_finished(self, tag='', info=''):
         """
         Called when the scroll timer finishes (scrolling has stopped (debounced)).
         Updates markers for the new visible VIEWPORT portion.
+        Also updates gutter icon position to keep it in the middle of viewport.
         """
         if not tag:
             return
@@ -1361,6 +1423,13 @@ class Command:
             return
         
         session = self.get_session(ed_self)
+        
+        # Update gutter icon position to middle of viewport (keep it always visible)
+        if session.gutter_icon_active:
+            line_top = ed_self.get_prop(PROP_LINE_TOP)
+            line_bottom = ed_self.get_prop(PROP_LINE_BOTTOM)
+            middle_line = (line_top + line_bottom) // 2
+            self.show_gutter_icon(ed_self, middle_line, active=True)
         
         if session.editing:
             # In editing mode: redraw with borders markers for current active word
