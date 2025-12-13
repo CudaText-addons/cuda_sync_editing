@@ -1026,22 +1026,167 @@ class Command:
         # Reset carets to single caret at the ORIGINAL position (where user first clicked)
         # Find the caret that corresponds to the line where the user started editing,
         # otherwise it defaults to carets[0] and jumps to the top of the file.
-        # """
+        # '''
         carets = ed_self.get_carets()
         if carets:
             final_x, final_y = carets[0][0], carets[0][1] # Default to first caret            
             if session.original:
+                orig_x = session.original[0]
                 orig_y = session.original[1]
+                
                 # Find the caret that is on the same line as the original click
                 for (cx, cy, _, _) in carets:
-                    if cy == orig_y:
+                    # if user used up/down keyboard keys to move the caret we have to check also one line above (orig_y+1) and one line bellow (orig_y-1) the current line to get the wanted caret
+                    # if cy == orig_y or cy == orig_y+1 or cy == orig_y-1:
+                    # if orig_y - 1 <= cy <= orig_y + 1:
+                        # final_x, final_y = cx, cy
+                        # break
+                    
+                    if cy == orig_y-1:
+                        # there is a caret above our edited word, maybe we pressed up key? if x is same then yes and this is our word position
+                        if cx == orig_x:
+                            print("up key")
+                            final_x, final_y = cx, cy
+                            break
+                    elif cy == orig_y+1:
+                        # there is a caret bellow our edited word, maybe we pressed down key? if x is same then yes and this is our word position
+                        if cx == orig_x:
+                            print("down key")
+                            final_x, final_y = cx, cy
+                            break
+                    elif cy == orig_y:
+                        # there is a caret in the same line of our edited word, maybe we pressed left or right key?
+                        # if x of the found caret is the same+1 of our word then we pressed right key and this is our word position
+                        # if x of the found caret is the same-1 of our word then we pressed right key and this is our word position
+                        if cx == orig_x+1:
+                            final_x, final_y = cx, cy
+                            print("right key")
+                            break
+                        elif cx == orig_x-1:
+                            print("left key")
+                            final_x, final_y = cx, cy
+                            break
+                        
+                        
+                        
+            print("session.original",session.original[0],session.original[1])
+            print("final_x, final_y",final_x, final_y)
+            print("carets",carets)
+            ed_self.set_caret(final_x, final_y, id=CARET_SET_ONE, options=CARET_OPTION_NO_EVENT+CARET_OPTION_NO_SCROLL)
+
+        # '''
+            
+        # carets = ed_self.get_carets()
+
+        # ed_self.set_caret(carets[0][0], carets[0][1], id=CARET_SET_ONE)
+        # ed_self.set_caret(carets[0][0], carets[0][1], id=CARET_SET_ONE, options=CARET_OPTION_NO_EVENT+CARET_OPTION_NO_SCROLL)
+        # ed_self.set_caret(carets[0][0], carets[0][1], id=CARET_SET_ONE, options=3)
+        # 
+        # carets = ed.get_carets()
+        # ed.set_caret(carets[0][0], carets[0][1], id=CARET_SET_ONE, options=CARET_OPTION_NO_EVENT+CARET_OPTION_NO_SCROLL)
+
+
+              
+                            
+                            
+        '''
+        carets = ed_self.get_carets()
+        if carets:
+            # Default fallback to first caret
+            final_x, final_y = carets[0][0], carets[0][1]
+            
+            # --- FAST SEARCH ---
+            # If we have an original position, try to find a caret near it.
+            if session.original:
+                orig_x, orig_y = session.original
+                best_dist = float('inf')
+                for (cx, cy, _, _) in carets:                    
+                    # 3. Check if this caret is on the Original, Previous, or Next line
+                    if orig_y - 1 <= cy <= orig_y + 1:
+                        # Calculate how close this caret is to our original X
+                        # This handles the "Short Line" issue perfectly.
+                        dist = abs(cx - orig_x)
+                        
+                        # If this caret is closer to where we were, pick it.
+                        # This prioritizes the caret that looks like the "active" one.
+                        if dist < best_dist:
+                            best_dist = dist
+                            final_x, final_y = cx, cy
+                        break
+            
+            ed_self.set_caret(final_x, final_y, id=CARET_SET_ONE, options=CARET_OPTION_NO_EVENT+CARET_OPTION_NO_SCROLL)
+
+        '''
+
+
+
+        '''
+        carets = ed_self.get_carets()
+        if carets:
+            final_x, final_y = carets[0][0], carets[0][1]
+            if session.original:
+                orig_y = session.original[1]
+                
+                # Binary search to find first caret at line >= (orig_y - 1)
+                left, right = 0, len(carets)
+                target_y = orig_y - 1
+                
+                while left < right:
+                    mid = (left + right) // 2
+                    if carets[mid][1] < target_y:
+                        left = mid + 1
+                    else:
+                        right = mid
+                
+                # Check only carets in range [orig_y-1, orig_y+1]
+                for i in range(left, len(carets)):
+                    cx, cy, _, _ = carets[i]
+                    if cy > orig_y + 1:
+                        break
+                    if orig_y - 1 <= cy <= orig_y + 1:
                         final_x, final_y = cx, cy
                         break
             
             ed_self.set_caret(final_x, final_y, id=CARET_SET_ONE)
-        # """
-        # if session.original:
-            # ed_self.set_caret(session.original[0], session.original[1], id=CARET_SET_ONE)
+        '''
+
+
+
+        '''
+        carets = ed_self.get_carets()
+        if carets:
+            # Default fallback to the very first caret (highest line number)
+            final_x, final_y = carets[0][0], carets[0][1]
+            
+            if session.original:
+                orig_x, orig_y = session.original
+                best_dist = float('inf')
+                
+                # Iterate through all carets
+                for (cx, cy, _, _) in carets:
+                    
+                    # Check if this caret is on the Original, Previous, or Next line
+                    if orig_y - 1 <= cy <= orig_y + 1:
+                        
+                        # Calculate how close this caret is to our original X position (column)
+                        # The absolute value handles line length differences when moving up/down.
+                        dist = abs(cx - orig_x)
+                        
+                        # If this caret is closer to where we were, update the best position
+                        if dist < best_dist:
+                            best_dist = dist
+                            final_x, final_y = cx, cy
+                        
+                        # We must continue the loop here (do not break!) to ensure 
+                        # we check all carets on the three lines for the BEST match.
+            
+            # Apply the final calculated position
+            # Use CARET_SET_ONE to collapse the multi-caret session
+            ed_self.set_caret(final_x, final_y, id=CARET_SET_ONE, options=CARET_OPTION_NO_EVENT+CARET_OPTION_NO_SCROLL)
+        '''
+
+
+
 
         # Reset flags to 'View/Selection' mode
         session.selected = True
