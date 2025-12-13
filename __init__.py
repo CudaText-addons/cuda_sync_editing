@@ -307,6 +307,7 @@ class Command:
         self.pending_lexer_parse_handles = set()  # Track editors waiting for lexer parsing notification
         self.active_scroll_handles = set() # Track editors with active sync sessions (for on_scroll event)
         self.active_caret_handles = set() # Track editors with active sync sessions (for on_caret event)
+        self.lexer_parsed_message_shown = set() # Track editors that already showed the message box
 
     def _update_event_subscriptions(self):
         """
@@ -497,6 +498,13 @@ class Command:
         # Use central event management instead of direct call to set_events_safely([]) to preserve other event from other editors like on_scroll/on_lexer_parsed
         self._update_event_subscriptions()
     
+        # prevent the message box from showing multiple times for the same editor. The issue is that on_lexer_parsed can be called multiple times for the same editor if lexer parsing happens repeatedly.
+        # dirty solution for late lexer parsing: to understand better why we need this check read the comment "dirty solution for late lexer parsing" in start_sync_edit. when a file is big and cudatext take time to finish parsing and user start sync edit the sync edit will exist because it did not find any tokens, when cudatext finishes parsing it will fire on_lexer_parsed then this function will show the message box alert below to the user telling him to restart the sync edit session. the problem is that when the user start the sync edit again, the plugin will subscribe again to on_lexer_parsed and cudatext have a strange behavior: even when the token parsing have already finished cudatext will still send on_lexer_parsed event when you edit the text of the file, this happens with big files, this means that the user will receive again the message box a second time even when in fact he does not really need to restart the sync edit session, this is why we prevent here to show the message more than one time. this is dirty but working with on_lexer_parsed and this strange behavior of cudatext with on_lexer_parsed does not allow a cleaner solution. but it works fine at least...
+        if handle in self.lexer_parsed_message_shown:
+            return
+        # Mark this editor as having shown the message
+        self.lexer_parsed_message_shown.add(handle)
+        
         # i prefer to show a message alert than running the sync edit, because if the user is already editing inside sync edit and we refresh he will not understand what happened and we may break what he is writing, so a message alert is more safe and inform the user of the problem
         # msg_status(_("Sync Editing: Lexer parsed. Starting..."))
         # self.start_sync_edit(ed_self, allow_timer=False)
@@ -735,7 +743,7 @@ class Command:
             tokenlist = ed_self.get_token(TOKEN_LIST_SUB, start_l, end_l) or []
             
             if not tokenlist:
-                # here we cannot simply call self.reset(ed_self) because it will remove on_lexer_parsed event, and this is not always wanted, for example if the user clicked the gutter icon to activate sync edit mode on a big file, cudatext will take some time to finish lexer token parsing so tokenlist will be empty because get_token(TOKEN_LIST_SUB returns nothing, in this case if we call self.reset(ed_self) we will reset on_lexer_parsed and when cudatext finishes its tokens parsing the user will not receive the alert to restart the sync edit session and will think that the plugin is bugged or that his document have no duplicates. so here we must reset but use cleanup_lexer_events=False arg to prevent removing on_lexer_parsed. but this means also that on_lexer_parsed will keep active if the file is small because cudatext send on_lexer_parsed event only if parsing take more than 600ms, so in this case on_lexer_parsed will not be reset so when the user open another big file he will receive on_lexer_parsed, but this is not bad because in on_lexer_parsed() function we check if the editor is registred to receive on_lexer_parsed event, so it is safe to leave on_lexer_parsed active
+                # dirty solution for late lexer parsing: here we cannot simply call self.reset(ed_self) because it will remove on_lexer_parsed event, and this is not always wanted, for example if the user clicked the gutter icon to activate sync edit mode on a big file, cudatext will take some time to finish lexer token parsing so tokenlist will be empty because get_token(TOKEN_LIST_SUB returns nothing, in this case if we call self.reset(ed_self) we will reset on_lexer_parsed and when cudatext finishes its tokens parsing the user will not receive the alert to restart the sync edit session and he will think that the plugin is bugged or that his document have no duplicates. so here we must reset but use cleanup_lexer_events=False arg to prevent removing on_lexer_parsed. but this means also that on_lexer_parsed will keep active if the file is small because cudatext send on_lexer_parsed event only if parsing take more than 600ms, so in this case on_lexer_parsed will not be reset so when the user open another big file he will receive on_lexer_parsed, but this is not bad because in on_lexer_parsed() function we check if the editor is registred to receive on_lexer_parsed event, so it is safe to leave on_lexer_parsed active
                 self.reset(ed_self, cleanup_lexer_events=False)
                 # self.reset(ed_self)
                 msg_status(_('Sync Editing: No syntax tokens found, or Lexer Parsing not finished yet...'))
@@ -1041,7 +1049,10 @@ class Command:
             self.pending_delay_handles.discard(handle)
             
             self.pending_lexer_parse_handles.discard(handle)
-            
+
+            # Clear message tracking when fully resetting
+            self.lexer_parsed_message_shown.discard(handle)
+
         # Update event subscriptions
         # here we unsubscribe from on_lexer_parsed if no more editors are waiting, on_scroll if no other editor need it, and on_caret if no other editor needs it
         self._update_event_subscriptions()
@@ -1242,7 +1253,6 @@ class Command:
             self.update_gutter_icon_on_selection(ed_self)
             return
 
-
     def on_caret(self, ed_self):
     # on_caret_slow is better because it will consume less resources but it breaks the colors recalculations when user edit an ID, so stick with on_caret
         """
@@ -1256,9 +1266,9 @@ class Command:
         NOTE: This event is ONLY subscribed during active sync sessions (dynamically).
         """
         # OPTIMIZATION: exit early if sync edit mode is not active
-        # This should never happen since we only subscribe when active
-        # if not self.has_session(ed_self):
-            # return
+        # This should never happen since we only subscribe when active, but when sync edit is active in one tab then we must prevent this to run on other tabs if the user switch to another tab, otherwise we will create a session for every tab the user switch to it and of course will add overhead also, so we must keep this check
+        if not self.has_session(ed_self):
+            return
         
         # === PROFILING START: ON_CARET ===
         if ENABLE_PROFILING_inside_on_caret:
