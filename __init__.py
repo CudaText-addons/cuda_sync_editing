@@ -5,13 +5,12 @@
 
 import re
 import os
-from . import randomcolor
+import time
 from cudatext import *
 from cudatext_keys import *
-from cudax_lib import html_color_to_int
+from cudax_lib import get_translation
 from collections import defaultdict
 
-from cudax_lib import get_translation
 _ = get_translation(__file__)  # I18N
 
 # --- Plugin Description & Logic ---
@@ -35,8 +34,6 @@ ENABLE_PROFILING_inside_on_caret = False
 ENABLE_PROFILING_inside_redraw = False
 ENABLE_PROFILING_inside_on_click = True
 ENABLE_BENCH_TIMER = True # print real time spent, usefull when profiling is disabled because profiling adds more overhead
-if ENABLE_BENCH_TIMER:
-    import time
 
 # --- Default Configuration ---
 USE_COLORS_DEFAULT = True
@@ -77,7 +74,6 @@ MARKER_CODE = app_proc(PROC_GET_UNIQUE_TAG, '') # Generate a unique integer tag 
 DECOR_TAG = app_proc(PROC_GET_UNIQUE_TAG, '')  # Unique tag for gutter decorations
 TOOLTIP_TEXT = _('Sync Editing: click to toggle')
 
-# Scroll debounce settings
 SCROLL_DEBOUNCE_DELAY = 150  # milliseconds to wait after scroll stops
 
 SHOW_PROGRESS=True
@@ -383,13 +379,12 @@ class Command:
         # === PROFILING START: START_SYNC_EDIT ===
         if ENABLE_PROFILING_inside_start_sync_edit:
             pr_start, s_start = start_profiling()
-        if ENABLE_BENCH_TIMER:
-            t0 = time.perf_counter()
-            t_prev = t0
         # ========================================
 
-        msg_status(_('Sync Editing: Analyzing. wait...'))
-
+        msg_status(_('Sync Editing: Analyzing...'))
+        t0 = time.perf_counter()
+        t_prev = t0
+            
         session = self.get_session(ed_self)
         # now that we created a session we should always call update_gutter_icon_on_selection before start_sync_edit to set gutter_icon_line (set by show_gutter_icon) which will be used in start_sync_edit to set the active gutter icon
         # Update gutter icon before starting to ensure session.gutter_icon_line is set. This allows us to flip it to "Active" mode shortly after.
@@ -440,7 +435,6 @@ class Command:
 
         # Mark the range properties for CudaText
         ed_self.set_prop(PROP_MARKED_RANGE, (session.start_l, session.end_l))
-
 
         # --- 2. Lexer / Parser Configuration ---
         # Instantiate config to get fresh values from disk on every session
@@ -513,7 +507,7 @@ class Command:
             t_now = time.perf_counter()
             print(f"START_SYNC_EDIT 30% get_token: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
             t_prev = t_now
-        if SHOW_PROGRESS: self.set_progress(40)
+        if SHOW_PROGRESS: self.set_progress(60)
         
         x1, y1, x2, y2 = caret
         # Sort coords of caret
@@ -524,17 +518,6 @@ class Command:
         if x2 == 0 and y2 > y1:
             y2 -= 1
             x2 = ed_self.get_line_len(y2)
-        # Drop tokens outside of selection
-        tokenlist = [t for t in tokenlist if \
-            not (t['y1'] == session.start_l and t['x1'] < x1) and \
-            not (t['y2'] == session.end_l and t['x2'] > x2) \
-            ]
-
-        if ENABLE_BENCH_TIMER: 
-            t_now = time.perf_counter()
-            print(f"START_SYNC_EDIT 40% clean selection: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
-            t_prev = t_now
-        if SHOW_PROGRESS: self.set_progress(60)
 
         # --- 3. Token Processing ---
         if not tokenlist and not session.use_simple_naive_mode:
@@ -552,6 +535,15 @@ class Command:
         # Pre-compute case sensitivity handler
         key_normalizer = (lambda s: s.lower()) if not session.case_sensitive else (lambda s: s)
         
+        # OPTIMIZATION: Cache style checks to avoid running Regex a lot of times
+        # Uses a dictionary style_cache to remember if a style is valid. Checks the dictionary (O(1)) instead of running Regex (O(N)) for every token.
+        style_cache = {}
+        def is_valid_style(style_str):
+            if style_str not in style_cache:
+                # Cache the boolean result
+                style_cache[style_str] = bool(include_re.match(style_str) and not exclude_re.match(style_str))
+            return style_cache[style_str]
+
         # Step A: Build Dictionary First (Do not touch line_index yet)
         if session.use_simple_naive_mode:
             # Naive Mode: Scan text purely by Regex, ignoring syntax context
@@ -568,13 +560,20 @@ class Command:
                     session.dictionary[key].append(token_ref)
         else:
             # Standard Lexer Mode: Filter tokens by Style (Variable, Function, etc.)
+
+            start_line = session.start_l
+            end_line = session.end_l
             for token in tokenlist:
-                # Check if a token's style matches the allowed patterns (IDs) and rejects Keywords.
-                style = token['style']
-                if not include_re.fullmatch(style) or exclude_re.fullmatch(style):
+                # A. Drop tokens outside of selection
+                if token['y1'] == start_line and token['x1'] < x1: continue
+                if token['y2'] == end_line and token['x2'] > x2: continue
+                
+                # B. Check if a token's style matches the allowed patterns (IDs) and rejects Keywords.
+                if not is_valid_style(token['style']):
                     continue
                 
-                idd = key_normalizer(token['str'].strip())
+                # C. Add to dictionary
+                idd = key_normalizer(token['str'])
                 token_ref = TokenRef(token['x1'], token['y1'], token['x2'], token['y2'], token['str'], token['style'])
                 session.dictionary[idd].append(token_ref)
         
@@ -591,7 +590,7 @@ class Command:
             t_now = time.perf_counter()
             print(f"START_SYNC_EDIT 65% remove dup: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
             t_prev = t_now
-        if SHOW_PROGRESS: self.set_progress(80)
+        if SHOW_PROGRESS: self.set_progress(85)
         
         # Validation: Ensure we actually found words to edit. Exit if no id's (eg: comments and etc)
         if not session.dictionary:
@@ -614,7 +613,7 @@ class Command:
 
         if ENABLE_BENCH_TIMER: 
             t_now = time.perf_counter()
-            print(f"START_SYNC_EDIT 80% build line: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
+            print(f"START_SYNC_EDIT 85% build line: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
             t_prev = t_now
         if SHOW_PROGRESS: self.set_progress(90)
 
@@ -622,9 +621,19 @@ class Command:
         # Pre-generate all colors to maintain consistency of colors when switching between View and Edit mode, so words will have the same color always inside the same session, and this reduce overhead also
         if session.use_colors:
             session.word_colors = {}
-            rand_color = randomcolor.RandomColor()
             for key in session.dictionary:
-                session.word_colors[key] = html_color_to_int(rand_color.generate(luminosity='light')[0])
+                # Deterministic hash-based color (Instant)
+                # Use string hash to generate RGB
+                h = hash(key)
+                r = (h & 0xFF0000) >> 16
+                g = (h & 0x00FF00) >> 8
+                b = (h & 0x0000FF)
+                # Force light pastel colors (High brightness/saturation)
+                r = (r % 127) + 128
+                g = (g % 127) + 128
+                b = (b % 127) + 128
+                col_int = r | (g << 8) | (b << 16)
+                session.word_colors[key] = col_int
 
         if ENABLE_BENCH_TIMER: 
             t_now = time.perf_counter()
@@ -642,7 +651,23 @@ class Command:
             t_prev = t_now 
         if SHOW_PROGRESS: self.set_progress(-1)
 
-        msg_status(_('Sync Editing: Click an ID to edit, click gutter icon or press Esc to exit.'))
+        # Calculate summary statistics for the status bar message
+        if session.dictionary:
+            # Total number of unique words found with duplicates (unique duplicates)
+            unique_duplicates_count = len(session.dictionary) 
+            
+            # Total number of word occurrences across all dictionary entries (total duplicates)
+            total_duplicates_count = sum(len(v) for v in session.dictionary.values())
+            
+            total_elapsed_time = time.perf_counter() - t0
+
+            msg_summary = _(f'Sync Editing: Click ID to edit or Icon/Esc to exit. IDs={unique_duplicates_count}, Dups={total_duplicates_count}  ({total_elapsed_time:.3f}s)')
+        else:
+            # Fallback message if dictionary is empty (though handled by early exits)
+            msg_summary = _('Sync Editing: No editable identifiers found in selection')
+
+        msg_status(msg_summary)
+        
         # restore caret but w/o selection
         restore_caret()
         
@@ -652,6 +677,7 @@ class Command:
         # see wall-clock time (Python + native marker add + repaint)
         if ENABLE_BENCH_TIMER:
             print(f"START_SYNC_EDIT: {time.perf_counter() - t0:.4f}s")
+            print(f"Sync Editing: IDs={unique_duplicates_count}, Total Dups={total_duplicates_count}")
         # =======================================
 
     def set_progress(self, prg):
