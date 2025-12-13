@@ -59,7 +59,7 @@ NON_STANDARD_LEXERS = {
 }
 
 # Lexers where we skip syntax parsing and just use Regex (Naive mode)
-# This is useful for plain text formats or where CudaText lexers don't output specific 'Id' styles.
+# This is useful for plain text formats or where CudaText lexers doesn't output specific 'Id' styles.
 NAIVE_LEXERS = [
   'Markdown', # it has 'Text' rule for many chars, including punctuation+spaces
   'reStructuredText',
@@ -666,37 +666,27 @@ class Command:
         the boundaries of the word currently being edited.
         
         FIX: During Edit Mode, we ignore the regex check and rely purely on the geometric
-        bounds, which are dynamically updated in `redraw`. This allows non-identifier
-        characters (like dots) to be included in the word without breaking the session.
+        bounds (x1, x2) stored in the dictionary, which are dynamically updated in `redraw`.
+        This allows non-identifier characters (like dots) to be included.
         """
         session = self.get_session(ed_self)
-        if not session.our_key:
-            return False
+        if not session.our_key: return False
         carets = ed_self.get_carets()
-        if not carets:
-            return False
+        if not carets: return False
         x0, y0, x1, y1 = carets[0]
-        current_line = ed_self.get_text_line(y0)
-        for key_tuple in session.dictionary.get(session.our_key, []):
+        
+        # We must rely on the geometric bounds stored in session.dictionary
+        active_instances = session.dictionary.get(session.our_key, [])
+        
+        for key_tuple in active_instances:
             start_pos, end_pos = key_tuple[0], key_tuple[1]
-            if y0 != start_pos[1]:
-                continue
-            start_x = start_pos[0]
-            if x0 < start_x:
-                continue
-
-            # Special Check: Allow caret to be at the immediate end of the word being typed.
-            # If the regex matches a string starting at start_x, and the caret is at the end of that match,
-            # we consider it "inside" so the user can continue typing. so this allow caret to stay considered "inside" while the token is being grown
-            # if session.regex_identifier:
-            #     match = session.regex_identifier.match(current_line[start_x:]) if start_x <= len(current_line) else None
-            #     if match:
-            #         dynamic_end = start_x + len(match.group(0))
-            #         if x0 <= dynamic_end:
-            #             return True
-
-            if x0 <= end_pos[0]:
+            if y0 != start_pos[1]: continue
+            
+            # Simple bounds check: is caret between start_x and end_x?
+            # Must include end_pos[0] because CudaText caret can be at the *end* of the word.
+            if x0 >= start_pos[0] and x0 <= end_pos[0]:
                 return True
+                
         return False
 
     def reset(self, ed_self=None):
@@ -914,18 +904,28 @@ class Command:
             stop_profiling(pr_on_caret, s_on_caret, sort_key='cumulative', title='PROFILE: on_caret (End)')
         # =================================================
 
+    def on_key(self, ed_self, key, _state):
+        """
+        Handles Esc Keyboard input to cancel sync editing.
+        Strict Exit Logic: Only VK_ESCAPE triggers the full 'reset' (Exit).
+        """
+        # OPTIMIZATION: exit early if sync edit mode is not active
+        if not self.has_session(ed_self):
+            return
+
+        if key == VK_ESCAPE:
+            self.reset(ed_self)
+            return False
+
     def redraw(self, ed_self):
         """
         Dynamically updates markers and dictionary positions during typing.
-        Because editing changes the length of the word, we must:
-        1. Find the new word string at the caret position.
-        2. Update the dictionary entry for the currently edited word (start/end positions).
-        3. Shift positions of ALL other words that exist on the same line after the caret.
-        4. Re-draw all the borders.
         
-        FIX: Geometry-Based Redraw.
-        We track the change in line length (delta) to calculate the new word string
-        and subsequent shifts, ignoring IDENTIFIER_REGEX_DEFAULT for the active word.
+        FIX: Geometry-Based Length Calculation.
+        The function now calculates the new word length based on the line length delta,
+        rather than relying on IDENTIFIER_REGEX_DEFAULT, which enables typing of non-identifier
+        characters (like '.' or '-'). The original, complex shifting logic is preserved
+        using the calculated per-instance delta (`inst_delta`).
         """
         # === PROFILING START: REDRAW ===
         # Measures the time taken for recalculating positions on a keypress.
@@ -944,7 +944,6 @@ class Command:
             return
 
         old_key = session.our_key
-        
         carets = ed_self.get_carets()
         if not carets: 
             # === PROFILING STOP: REDRAW (Exit Early 2) ===
@@ -955,31 +954,36 @@ class Command:
 
         cx, cy = carets[0][:2]
         
-        # 1. Identify the 'Anchor' instance we are editing
-        # We look in the dictionary for the token on this line that is closest to the caret
-        # Note: dictionary has OLD coordinates
-        candidates = [t for t in session.dictionary.get(old_key, []) if t[0][1] == cy]
-        if not candidates: 
-            # Fallback (should not happen in valid state)
-            # === PROFILING STOP: REDRAW (Exit Early 3) ===
-            if ENABLE_PROFILING_inside_redraw:
-                stop_profiling(pr_redraw, s_redraw, sort_key='cumulative', title='PROFILE: redraw (Live Typing - Exit Early 3)')
-            # ===========================================
-            return
+        # 1. Find Anchor Token and Calculate Deltas
+        
+        # Find the token instance currently being edited (the "anchor")
+        old_key_dictionary = session.dictionary.get(old_key, [])
+        candidates = [t for t in old_key_dictionary if t[0][1] == cy]
+        if not candidates: return
             
-        # Find closest token to caret
-        active_entry = min(candidates, key=lambda t: abs(t[0][0] - cx))
-        start_x = active_entry[0][0] # The starting X of the token before this edit
+        # Find closest token to caret (the anchor token)
+        anchor_entry = min(candidates, key=lambda t: abs(t[0][0] - cx))
+        start_x = anchor_entry[0][0] # The starting X of the token before this edit
 
-        # 2. Calculate Delta
         current_line_text = ed_self.get_text_line(cy)
+        
         old_line_len = session.line_lengths.get(cy, len(current_line_text))
-        delta = len(current_line_text) - old_line_len
+        line_delta = len(current_line_text) - old_line_len
         
-        # 3. Determine New Key
-        # New length = Old Key Length + Delta (This is the key to accepting non-identifier chars)
-        new_len = len(old_key) + delta
+        # 2. Determine Per-Instance Delta (inst_delta)
+        # We must use the old_key_dictionary to count instances on the anchor line.
+        inst_count = sum(1 for t in old_key_dictionary if t[0][1] == cy)
         
+        if inst_count == 0: return # Should not happen
+
+        # The key fix: CudaText applies the same change at every cursor.
+        # Total line delta is the sum of all changes. The change per instance is line_delta / inst_count.
+        inst_delta = line_delta // inst_count # Integer division is safe for single characters
+
+        old_len = len(old_key)
+        new_len = old_len + inst_delta 
+        
+        # 3. Handle Deletion (if new_len is 0 or less)
         if new_len <= 0:
             # Handle deletion of word
             session.our_key = None
@@ -992,99 +996,104 @@ class Command:
             # ===========================================
             return
             
-        # Extract new key string directly from text using geometry
-        new_key_display = current_line_text[start_x : start_x + new_len]
+        # 4. Extract New Key Geometrically
+        # Extract new key string directly from text using geometry (the new word might contain dots, dashes, etc.)
+        if start_x + new_len > len(current_line_text):
+             new_key_display = current_line_text[start_x:]
+             new_len = len(new_key_display)
+        else:
+             new_key_display = current_line_text[start_x : start_x + new_len]
+
         if not session.case_sensitive:
             new_key = new_key_display.lower() # Logic case
         else:
             new_key = new_key_display
 
-        session.our_key = new_key # Now we update it
-
-        # 4. Update Dictionary & Calculate Shifts
+        # 5. Update Dictionary and Shift Positions (Only for the edited key)
         
-        # Pre-calculate shift for lines
-        affected_lines = set()
-        old_key_dictionary = session.dictionary.get(old_key, [])
-        for entry in old_key_dictionary:
-            affected_lines.add(entry[0][1])
-
-        # Prepare existing_entries list for the new key (which may be old_key if only length changed)
-        # We start with an empty list for the new key, and populate it with shifted old_key tokens.
-        existing_entries = []
-        
-        # Pointers are the starting coordinates of all instances of the OLD_KEY
-        pointers = [i[0] for i in old_key_dictionary]
-        pointers.sort(key=lambda p: (p[1], p[0])) # Sort top-down, left-right
-
-        # This map tracks the *accumulated* shift on a line due to multiple instances of the same word being edited.
-        line_shifts = defaultdict(int) 
-        
-        for p in pointers:
-            ox, oy = p
-            
-            # The new X position for this instance is its original X plus the total shift caused by previous instances on the same line that were also edited.
-            nx = ox + line_shifts[oy]
-            
-            # Update list
-            existing_entries.append(((nx, oy), (nx+new_len, oy), new_key_display, 'Id'))
-            
-            # Increment the shift for the NEXT word on this line (if there is one)
-            line_shifts[oy] += delta
-            
-        # Update stored line lengths for the *next* redraw
-        for y in affected_lines:
-            session.line_lengths[y] = len(ed_self.get_text_line(y))
-
-        # Update dictionary keys for the edited word. Clean up old key if it changed completely
+        # If the key name changed, we need to create a new list for it, otherwise we update the old one.
         if old_key != new_key:
-            session.dictionary.pop(old_key, None)
-        session.dictionary[new_key] = existing_entries
+            # Pop old key, but keep the entries in memory for processing
+            old_entries_to_process = session.dictionary.pop(old_key, [])
+            if new_key not in session.dictionary:
+                session.dictionary[new_key] = []
+        else:
+            old_entries_to_process = old_key_dictionary
 
-        # 5. Shift Other Words on the Same Line. Update positions of ALL other words on affected lines
-        if delta != 0:
-            for line_num in affected_lines:
-                # Iterate over ALL other words in the dictionary
-                for other_key in list(session.dictionary.keys()):
-                    if other_key == new_key:
-                        continue  # Skip the word we just edited
+        new_entries = []
+        cumulative_line_shift = defaultdict(int)
+        
+        # Shift all instances of the word currently being edited
+        for p_start, p_end, str_old, style_old in old_entries_to_process:
+            ox, oy = p_start
+            
+            # This instance's new position starts at its old position + the cumulative shift applied by previous instances on this line.
+            nx = ox + cumulative_line_shift[oy]
+            
+            # The new entry uses the new position (nx), the new length, and the new display string
+            new_entries.append(((nx, oy), (nx + new_len, oy), new_key_display, style_old))
+            
+            # The shift for the next token on this line is inst_delta
+            cumulative_line_shift[oy] += inst_delta
 
-                    updated_entries = []
-                    for entry in session.dictionary[other_key]:
-                        if entry[0][1] == line_num:  # If this word is on the affected line. Same line
-                            word_start_x = entry[0][0]
-                            word_end_x = entry[1][0]
+        session.dictionary[new_key] = new_entries
+        session.our_key = new_key # Update the active key
+        
+        # 6. Update Stored Line Lengths (Only the line being edited)
+        session.line_lengths[cy] = len(current_line_text)
+        
+        # 7. Shift Other Words (Crucial part that manages surrounding tokens)
+        
+        if inst_delta != 0:
+            # We iterate over the lines that were affected by the edits
+            for line_num, final_shift_on_line in cumulative_line_shift.items():
+                if final_shift_on_line == 0: continue
+                
+                # Check ALL other keys/tokens in the whole dictionary
+                for other_k in list(session.dictionary.keys()):
+                    if other_k == new_key: continue
+                    
+                    updated_items = []
+                    
+                    for item in session.dictionary.get(other_k, []):
+                        if item[0][1] != line_num:
+                             updated_items.append(item)
+                             continue
 
-                            # Calculate total shift: Check how many edited instances are to the left of this word.
-                            # We use the sorted original tokens of the OLD_KEY on this line.
-                            shift_amount = 0
-                            for p in pointers:
-                                if p[1] == line_num and p[0] < word_start_x:
-                                    shift_amount += delta
+                        ix = item[0][0] # Original X of the 'other' token
 
-                            if shift_amount != 0:
-                                # Create new entry with shifted position
-                                new_entry = (
-                                    (word_start_x + shift_amount, entry[0][1]),
-                                    (word_end_x + shift_amount, entry[1][1]),
-                                    entry[2],
-                                    entry[3]
-                                )
-                                updated_entries.append(new_entry)
-                            else:
-                                updated_entries.append(entry)
+                        # Calculate the total shift that should be applied to this token:
+                        # Sum of all 'inst_delta's from edited instances whose *original* start_x was < this token's *original* start_x.
+                        
+                        total_shift = 0
+                        
+                        # Use the original set of tokens (old_key_dictionary) for relative position check
+                        # Note: we use old_key_dictionary because it contains the unshifted starting positions (p_start[0]).
+                        for p_start, _, _, _ in old_key_dictionary:
+                             if p_start[1] == line_num and p_start[0] < ix:
+                                  total_shift += inst_delta
+                        
+                        if total_shift != 0:
+                            iy = item[0][1]
+                            new_item = (
+                                (item[0][0]+total_shift, iy),
+                                (item[1][0]+total_shift, iy),
+                                item[2],
+                                item[3]
+                            )
+                            updated_items.append(new_item)
                         else:
-                            # Different line, keep as-is
-                            updated_entries.append(entry)
-
-                    session.dictionary[other_key] = updated_entries
-
-        # 6. Repaint borders for ALL words
+                            updated_items.append(item)
+                    
+                    # Update the dictionary entry for this 'other' key
+                    session.dictionary[other_k] = updated_items
+        
+        # 8. Repaint markers for the actively edited word
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
 
         # Collect all markers to add, sorted by (y, x)
         markers_to_add = []
-        for key_tuple in session.dictionary[session.our_key]:
+        for key_tuple in session.dictionary.get(session.our_key, []):
             markers_to_add.append((
                 key_tuple[0][1],  # y
                 key_tuple[0][0],  # x
@@ -1113,7 +1122,7 @@ class Command:
             stop_profiling(pr_redraw, s_redraw, sort_key='time', max_lines=200, title='PROFILE: redraw (Live Typing)')
         if ENABLE_BENCH_TIMER:
             # see wall-clock time (Python + native marker add + repaint)
-            print(f"REDRAW: {time.perf_counter() - t0:.4f}s  instances={len(existing_entries)}")
+            print(f"REDRAW: {time.perf_counter() - t0:.4f}s  instances={len(new_entries)}")
         # ==============================
 
     def config(self):
