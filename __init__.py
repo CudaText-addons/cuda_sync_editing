@@ -30,9 +30,9 @@ _ = get_translation(__file__)  # I18N
 
 
 # Set to True to enable code profiling (outputs to CudaText console).
-ENABLE_PROFILING = True
-ENABLE_PROFILING_inside_on_caret = True
-ENABLE_PROFILING_inside_redraw = True
+ENABLE_PROFILING = False
+ENABLE_PROFILING_inside_on_caret = False
+ENABLE_PROFILING_inside_redraw = False
 ENABLE_BENCH_TIMER = True # print real time spent, usefull when profiling is disabled because profiling adds more overhead
 if ENABLE_BENCH_TIMER:
     import time
@@ -75,6 +75,9 @@ NAIVE_LEXERS = [
 MARKER_CODE = app_proc(PROC_GET_UNIQUE_TAG, '') # Generate a unique integer tag for this plugin's markers to avoid conflicts with other plugins
 DECOR_TAG = app_proc(PROC_GET_UNIQUE_TAG, '')  # Unique tag for gutter decorations
 TOOLTIP_TEXT = _('Sync Editing: click to toggle')
+
+# Scroll debounce settings
+SCROLL_DEBOUNCE_DELAY = 150  # milliseconds to wait after scroll stops
 
 
 def bool_to_ini(value):
@@ -354,13 +357,22 @@ class Command:
         # Otherwise, start sync editing
         self.start_sync_edit(ed_self)
 
+    def get_visible_line_range(self, ed_self):
+        """
+        Calculate the range of visible lines in the editor viewport.
+        Returns (first_visible_line, last_visible_line) tuple.
+        """
+        line_top = ed_self.get_prop(PROP_LINE_TOP)
+        line_bottom = ed_self.get_prop(PROP_LINE_BOTTOM)
+        return (line_top, line_bottom)
+
     def start_sync_edit(self, ed_self):
         """
         Starts sync editing session.
         1. Validates selection.
         2. Scans text (via Lexer or Regex).
         3. Groups identical words.
-        4. Applies visual markers (colors).
+        4. Applies visual markers (colors) - ONLY FOR VISIBLE VIEWPORT PORTION.
         5. Builds spatial index for fast lookups.
 
         All configuration is read fresh from file/theme on every start so the user does not need to restart CudaText.
@@ -587,7 +599,7 @@ class Command:
 
         self.set_progress(95)
         
-        # --- 5. Apply Visual Markers ---
+        # --- 5. Apply Visual Markers (ONLY FOR VISIBLE VIEWPORT PORTION) ---
         # Visualize all editable identifiers in the selection. Mark all words that we can modify with pretty light color
         self.mark_all_words(ed_self)
         self.set_progress(-1)
@@ -611,7 +623,7 @@ class Command:
 
     def mark_all_words(self, ed_self):
         """
-        Visualizes all editable identifiers in the selection.
+        Visualizes all editable identifiers in the selection. ONLY IN THE VISIBLE VIEWPORT PORTION.
         Used during initialization and when returning to selection mode after an edit.
         Uses batch marker operations for better performance.
         """
@@ -620,7 +632,11 @@ class Command:
         if not session.use_colors:
             return
         
+        # Get visible line range
+        line_top, line_bottom = self.get_visible_line_range(ed_self)
+        
         # Collect all markers to add, sorted by (y, x)
+        # Collect markers only for visible VIEWPORT lines
         markers_to_add = []
         
         for key in session.dictionary:
@@ -628,12 +644,14 @@ class Command:
             color = session.word_colors.get(key, 0xFFFFFF)
             
             for token_ref in session.dictionary[key]:
-                markers_to_add.append((
-                    token_ref.start_y,  # y
-                    token_ref.start_x,  # x
-                    token_ref.end_x - token_ref.start_x,  # len
-                    color
-                ))
+                # OPTIMIZATION: Only add markers for the visible lines of the VIEWPORT
+                if line_top <= token_ref.start_y <= line_bottom:
+                    markers_to_add.append((
+                        token_ref.start_y,  # y
+                        token_ref.start_x,  # x
+                        token_ref.end_x - token_ref.start_x,  # len
+                        color
+                    ))
         
         # Sort markers by (y, x) because this is what attr(MARKERS_ADD does internally, so we help it here to speed up things
         # this is very important for big files, a 9mb javascript file with 400k duplicates takes 14min, with this it takes only 22s see: https://github.com/CudaText-addons/cuda_sync_editing/issues/23
@@ -681,7 +699,7 @@ class Command:
         session.selected = True
         session.our_key = None
 
-        # Re-paint markers so user can see what else to edit
+        # Re-paint markers so user can see what else to edit (ONLY VISIBLE VIEWPORT PORTION)
         self.mark_all_words(ed_self)
 
     def caret_in_current_token(self, ed_self):
@@ -769,7 +787,7 @@ class Command:
         Logic:
         1. If Editing -> Finish current edit (Loop back to Selection).
         2. If Selection -> Check if click is on valid ID.
-           - Yes: Start Editing (Add carets, borders).
+           - Yes: Start Editing (Add carets to ALL duplicates, and add color and borders to VISIBLE VIEWPORT PORTION only).
            - No: Do nothing (Do not exit).
         Uses spatial index for faster word lookups.
         """
@@ -818,21 +836,37 @@ class Command:
         session.our_key = clicked_key
         session.original = (caret[0], caret[1])
 
+        # Get visible line range
+        line_top, line_bottom = self.get_visible_line_range(ed_self)
+
         # Collect all markers to add, sorted by (y, x)
+        # Collect markers only for visible lines
+        # we collect ALL instances for caret placement, but markers only for visible lines
+        all_carets = []
         markers_to_add = []
+        
         for token_ref in session.dictionary[session.our_key]:
-            markers_to_add.append((
+            # Add caret to ALL instances (editing must work on all words)
+            all_carets.append((
                 token_ref.start_y,  # y
                 token_ref.start_x,  # x
-                token_ref.end_x - token_ref.start_x,  # len
                 offset  # store offset for caret placement
             ))
+            
+            # But only add markers for VISIBLE instances (rendering optimization)
+            if line_top <= token_ref.start_y <= line_bottom:
+                markers_to_add.append((
+                    token_ref.start_y,  # y
+                    token_ref.start_x,  # x
+                    token_ref.end_x - token_ref.start_x,  # len
+                ))
         
-        # Sort markers by (y, x)
+        # Sort both lists by (y, x)
+        all_carets.sort(key=lambda c: (c[0], c[1]))
         markers_to_add.sort(key=lambda m: (m[0], m[1]))
         
-        # Add active carets and borders to ALL instances of the clicked word
-        for y, x, length, off in markers_to_add:
+        # Add active borders ONLY to visible VIEWPORT instances of the clicked word
+        for y, x, length in markers_to_add:
             ed_self.attr(MARKERS_ADD, tag=MARKER_CODE,
                 x=x, y=y,
                 len=length,
@@ -844,7 +878,10 @@ class Command:
                 border_down=1,
                 border_up=1
             )
-            # Add secondary caret at the corresponding offset
+        
+        # Add secondary caret at the corresponding offset
+        # Add carets to ALL instances (not just visible VIEWPORT ones)
+        for y, x, off in all_carets:
             ed_self.set_caret(x + off, y, id=CARET_ADD)
 
         # Update state
@@ -940,6 +977,106 @@ class Command:
             # stop_profiling(pr_on_caret, s_on_caret, sort_key='cumulative', title='PROFILE: on_caret (End)')
         # =================================================
 
+    def on_scroll(self, ed_self):
+        """
+        Called when user scrolls the editor viewport.
+        Updates markers to show only visible portions. This enables smooth scrolling with large files.
+        Uses a timer to debounce scroll events - only updates markers when scrolling stops (reduces CPU usage and makes scroll smooth).
+        """
+        # OPTIMIZATION: exit early if sync edit mode is not active
+        if not self.has_session(ed_self):
+            return
+        
+        session = self.get_session(ed_self)
+        # Only update if we're in active mode
+        if not (session.selected or session.editing):
+            return
+      
+        # Get editor handle to use as timer tag key
+        editor_handle = self.get_editor_handle(ed_self)
+        
+        # Stop any existing scroll timer for this editor
+        timer_proc(TIMER_STOP, self._on_scroll_timer_finished, interval=0, tag=str(editor_handle))
+        
+        # Start a new timer that will fire when scrolling stops (150ms delay)
+        timer_proc(TIMER_START_ONE, self._on_scroll_timer_finished, interval=SCROLL_DEBOUNCE_DELAY, tag=str(editor_handle))
+
+    def _on_scroll_timer_finished(self, tag='', info=''):
+        """
+        Called when the scroll timer finishes (scrolling has stopped (debounced)).
+        Updates markers for the new visible VIEWPORT portion.
+        """
+        if not tag:
+            return
+        
+        # Get editor from handle
+        editor_handle = int(tag)
+        ed_self = Editor(editor_handle)
+        
+        # Check if this editor still has an active session
+        if not self.has_session(ed_self):
+            return
+        
+        session = self.get_session(ed_self)
+        
+        if session.editing:
+            # In editing mode: redraw with borders markers for current active word
+            self._update_edit_markers(ed_self)
+            # self.redraw(ed_self)
+        elif session.selected:
+            # In selection/view mode: update colored background markers
+            self.mark_all_words(ed_self)
+
+    def _update_edit_markers(self, ed_self):
+        """
+        Updates border markers for the currently edited word
+        ONLY IN THE VISIBLE VIEWPORT PORTION.
+        
+        This function is a pure "Painter". It assumes the internal dictionary positions are already correct (because the user hasn't typed, only scrolled).
+        It simply looks at the existing data and draws the borders for the lines that are now visible.
+        
+        If we use redraw() inside on_scroll, we would be forcing the plugin to re-verify the word under the caret and attempt to update data structures every time the scroll timer fires. (High overhead)
+        The redraw function is designed to handle text changes (typing). so we should not use it for on_scroll event because there is absolutely no need to run Regex, calculate deltas, or modify the internal dictionary coordinates.
+        """
+        session = self.get_session(ed_self)
+        if not session.our_key:
+            return
+        
+        # Clear existing markers
+        ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
+        
+        # Get visible line range
+        line_top, line_bottom = self.get_visible_line_range(ed_self)
+        
+        # Collect all markers to add, sorted by (y, x)
+        # Collect markers only for visible lines
+        markers_to_add = []
+        for token_ref in session.dictionary[session.our_key]:
+            # OPTIMIZATION: Only add markers for the visible lines of the VIEWPORT
+            if line_top <= token_ref.start_y <= line_bottom:
+                markers_to_add.append((
+                    token_ref.start_y,  # y
+                    token_ref.start_x,  # x
+                    token_ref.end_x - token_ref.start_x  # len
+                ))
+        
+        # Sort markers by (y, x)
+        markers_to_add.sort(key=lambda m: (m[0], m[1]))
+        
+        # Draw active borders for the currently edited word
+        for y, x, length in markers_to_add:
+            ed_self.attr(MARKERS_ADD, tag=MARKER_CODE,
+                x=x, y=y,
+                len=length,
+                color_font=session.marker_fg_color,
+                color_bg=session.marker_bg_color,
+                color_border=session.marker_border_color,
+                border_left=1,
+                border_right=1,
+                border_down=1,
+                border_up=1
+            )
+
     def on_key(self, ed_self, key, _state):
         """
         Handles Esc Keyboard input to cancel sync editing.
@@ -960,7 +1097,7 @@ class Command:
         1. Find the new word string at the caret position.
         2. Update the dictionary entry for the currently edited word (start/end positions).
         3. Shift positions of ALL other words that exist on the same line after the caret.
-        4. Re-draw all the borders.
+        4. Re-draw borders ONLY FOR VISIBLE VIEWPORT PORTION.
         
         HEAVILY OPTIMIZED
         - Delta-based position updates (only shift what changed)
@@ -968,6 +1105,7 @@ class Command:
         - In-place TokenRef updates (no tuple recreation)
         - Early exit when nothing changed
         - O(k) complexity where k = tokens per line
+        - Only renders VIEWPORT visible markers
         """
         # === PROFILING START: REDRAW ===
         # Measures the time taken for recalculating positions on a keypress.
@@ -1106,22 +1244,28 @@ class Command:
         else:
             session.our_key = old_key
 
-        # 5. Repaint borders for ALL words
+        # 5. Repaint borders ONLY FOR VISIBLE VIEWPORT PORTION
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
 
+        # Get visible line range
+        line_top, line_bottom = self.get_visible_line_range(ed_self)
+
         # Collect all markers to add, sorted by (y, x)
+        # Collect markers only for visible lines
         markers_to_add = []
         for token_ref in session.dictionary[session.our_key]:
-            markers_to_add.append((
-                token_ref.start_y,  # y
-                token_ref.start_x,  # x
-                token_ref.end_x - token_ref.start_x  # len
-            ))
+            # OPTIMIZATION: Only add markers for the visible lines of the VIEWPORT
+            if line_top <= token_ref.start_y <= line_bottom:
+                markers_to_add.append((
+                    token_ref.start_y,  # y
+                    token_ref.start_x,  # x
+                    token_ref.end_x - token_ref.start_x  # len
+                ))
         
         # Sort markers by (y, x)
         markers_to_add.sort(key=lambda m: (m[0], m[1]))
         
-        # Draw active borders for the currently edited word
+        # Draw active borders for the currently edited word (visible VIEWPORT portion only)
         for y, x, length in markers_to_add:
             ed_self.attr(MARKERS_ADD, tag=MARKER_CODE,
                 x=x, y=y,
