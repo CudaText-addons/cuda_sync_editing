@@ -30,9 +30,10 @@ _ = get_translation(__file__)  # I18N
 
 
 # Set to True to enable code profiling (outputs to CudaText console).
-ENABLE_PROFILING = False
+ENABLE_PROFILING_inside_start_sync_edit = False
 ENABLE_PROFILING_inside_on_caret = False
 ENABLE_PROFILING_inside_redraw = False
+ENABLE_PROFILING_inside_on_click = True
 ENABLE_BENCH_TIMER = True # print real time spent, usefull when profiling is disabled because profiling adds more overhead
 if ENABLE_BENCH_TIMER:
     import time
@@ -79,6 +80,7 @@ TOOLTIP_TEXT = _('Sync Editing: click to toggle')
 # Scroll debounce settings
 SCROLL_DEBOUNCE_DELAY = 150  # milliseconds to wait after scroll stops
 
+SHOW_PROGRESS=True
 
 def bool_to_ini(value):
     return 'true' if value else 'false'
@@ -373,18 +375,21 @@ class Command:
         2. Scans text (via Lexer or Regex).
         3. Groups identical words into dictionary.
         4. Filters singletons (words with < 2 occurrences).
-        5. Builds spatial index for fast lookups. Builds spatial index (line_index) ONLY for valid words.        
+        5. Builds spatial index for fast lookups. Builds spatial index (line_index) ONLY for valid words.
         6. Applies visual markers (colors) - ONLY FOR VISIBLE VIEWPORT PORTION.
 
         All configuration is read fresh from file/theme on every start so the user does not need to restart CudaText.
         """
         # === PROFILING START: START_SYNC_EDIT ===
-        if ENABLE_PROFILING:
+        if ENABLE_PROFILING_inside_start_sync_edit:
             pr_start, s_start = start_profiling()
         if ENABLE_BENCH_TIMER:
             t0 = time.perf_counter()
+            t_prev = t0
         # ========================================
-        
+
+        msg_status(_('Sync Editing: Analyzing. wait...'))
+
         session = self.get_session(ed_self)
         # now that we created a session we should always call update_gutter_icon_on_selection before start_sync_edit to set gutter_icon_line (set by show_gutter_icon) which will be used in start_sync_edit to set the active gutter icon
         # Update gutter icon before starting to ensure session.gutter_icon_line is set. This allows us to flip it to "Active" mode shortly after.
@@ -396,7 +401,7 @@ class Command:
             msg_status(_('Sync Editing: Need single caret'))
             
             # === PROFILING STOP: START_SYNC_EDIT (Exit Early) ===
-            if ENABLE_PROFILING:
+            if ENABLE_PROFILING_inside_start_sync_edit:
                 stop_profiling(pr_start, s_start, title='PROFILE: start_sync_edit (Entry Mode - Early Exit)')
             # ====================================================
             return
@@ -414,12 +419,11 @@ class Command:
             msg_status(_('Sync Editing: Make selection first'))
             
             # === PROFILING STOP: START_SYNC_EDIT (Exit Early) ===
-            if ENABLE_PROFILING:
+            if ENABLE_PROFILING_inside_start_sync_edit:
                 stop_profiling(pr_start, s_start, title='PROFILE: start_sync_edit (Entry Mode - Early Exit)')
             # ====================================================
             return
 
-        self.set_progress(3)
         session.dictionary = defaultdict(list)
         session.line_index = defaultdict(list)
 
@@ -429,8 +433,6 @@ class Command:
 
         # Break text selection and clear visual selection to show markers instead
         ed_self.set_sel_rect(0,0,0,0)
-
-        self.set_progress(5)
 
         # Update gutter icon to show active state
         if session.gutter_icon_line is not None:
@@ -491,17 +493,28 @@ class Command:
 
         # NOTE: Do not use app_idle (set_progress) before EDACTION_LEXER_SCAN.
         # App_idle runs message processing which can conflict with parsing actions.
-        # self.set_progress(10) # do not use this here before ed.action(EDACTION_LEXER_SCAN. see bug: https://github.com/Alexey-T/CudaText/issues/6120 the bug happen only with this line. Alexey said: app_idle is the main reason, it is bad to insert it before some parsing action. Usually app_idle is needed after some action, to run the app message processing. Not before. Dont use it if not nessesary...
+        # if SHOW_PROGRESS: self.set_progress(10) # do not use this here before ed.action(EDACTION_LEXER_SCAN. see bug: https://github.com/Alexey-T/CudaText/issues/6120 the bug happen only with this line. Alexey said: app_idle is the main reason, it is bad to insert it before some parsing action. Usually app_idle is needed after some action, to run the app message processing. Not before. Dont use it if not nessesary...
 
         # Run lexer scan from start. Force a Lexer scan to ensure tokens are up to date
         # EDACTION_LEXER_SCAN seems not needed anymore see:https://github.com/Alexey-T/CudaText/issues/6124
         # ed_self.action(EDACTION_LEXER_SCAN, session.start_l) #API 1.0.289
-        self.set_progress(40)
+        
+        if ENABLE_BENCH_TIMER: 
+            t_now = time.perf_counter()
+            print(f"START_SYNC_EDIT 5% config: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
+            t_prev = t_now
+        if SHOW_PROGRESS: self.set_progress(30)
 
         # Find all occurences of regex, get all tokens in the selected range
         tokenlist = ed_self.get_token(TOKEN_LIST_SUB, session.start_l, session.end_l) or []
         # print("tokenlist",tokenlist)
 
+        if ENABLE_BENCH_TIMER: 
+            t_now = time.perf_counter()
+            print(f"START_SYNC_EDIT 30% get_token: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
+            t_prev = t_now
+        if SHOW_PROGRESS: self.set_progress(40)
+        
         x1, y1, x2, y2 = caret
         # Sort coords of caret
         if (y1, x1) > (y2, x2):
@@ -517,18 +530,21 @@ class Command:
             not (t['y2'] == session.end_l and t['x2'] > x2) \
             ]
 
-
-        self.set_progress(45)
+        if ENABLE_BENCH_TIMER: 
+            t_now = time.perf_counter()
+            print(f"START_SYNC_EDIT 40% clean selection: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
+            t_prev = t_now
+        if SHOW_PROGRESS: self.set_progress(60)
 
         # --- 3. Token Processing ---
         if not tokenlist and not session.use_simple_naive_mode:
             self.reset(ed_self)
             msg_status(_('Sync Editing: No syntax tokens found in selection'))
-            self.set_progress(-1)
+            if SHOW_PROGRESS: self.set_progress(-1)
             restore_caret()
             
             # === PROFILING STOP: START_SYNC_EDIT (Exit Early) ===
-            if ENABLE_PROFILING:
+            if ENABLE_PROFILING_inside_start_sync_edit:
                 stop_profiling(pr_start, s_start, title='PROFILE: start_sync_edit (Entry Mode - Early Exit)')
             # ====================================================
             return
@@ -562,20 +578,30 @@ class Command:
                 token_ref = TokenRef(token['x1'], token['y1'], token['x2'], token['y2'], token['str'], token['style'])
                 session.dictionary[idd].append(token_ref)
         
-        self.set_progress(60)
+        if ENABLE_BENCH_TIMER: 
+            t_now = time.perf_counter()
+            print(f"START_SYNC_EDIT 60% Build dict: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
+            t_prev = t_now
+        if SHOW_PROGRESS: self.set_progress(65)
         
         # Step B: Remove Singletons (Clean garbage): We delete keys that don't have duplicates because sync editing requires at least 2 occurrences. (issue #44 and #45)
         session.dictionary = {k: v for k, v in session.dictionary.items() if len(v) >= 2}
+        
+        if ENABLE_BENCH_TIMER: 
+            t_now = time.perf_counter()
+            print(f"START_SYNC_EDIT 65% remove dup: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
+            t_prev = t_now
+        if SHOW_PROGRESS: self.set_progress(80)
         
         # Validation: Ensure we actually found words to edit. Exit if no id's (eg: comments and etc)
         if not session.dictionary:
             self.reset(ed_self)
             msg_status(_('Sync Editing: No editable identifiers found in selection'))
-            self.set_progress(-1)
+            if SHOW_PROGRESS: self.set_progress(-1)
             restore_caret()
             
             # === PROFILING STOP: START_SYNC_EDIT (Exit Early) ===
-            if ENABLE_PROFILING:
+            if ENABLE_PROFILING_inside_start_sync_edit:
                 stop_profiling(pr_start, s_start, title='PROFILE: start_sync_edit (Entry Mode - Early Exit)')
             # ====================================================
             return
@@ -586,7 +612,11 @@ class Command:
             for token_ref in tokens:
                 session.line_index[token_ref.start_y].append((token_ref, key))
 
-        self.set_progress(90)
+        if ENABLE_BENCH_TIMER: 
+            t_now = time.perf_counter()
+            print(f"START_SYNC_EDIT 80% build line: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
+            t_prev = t_now
+        if SHOW_PROGRESS: self.set_progress(90)
 
         # --- 4. Generate Color Map (once for entire session) ---
         # Pre-generate all colors to maintain consistency of colors when switching between View and Edit mode, so words will have the same color always inside the same session, and this reduce overhead also
@@ -596,19 +626,28 @@ class Command:
             for key in session.dictionary:
                 session.word_colors[key] = html_color_to_int(rand_color.generate(luminosity='light')[0])
 
-        self.set_progress(95)
+        if ENABLE_BENCH_TIMER: 
+            t_now = time.perf_counter()
+            print(f"START_SYNC_EDIT 90% gen colors: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
+            t_prev = t_now
+        if SHOW_PROGRESS: self.set_progress(95)
         
         # --- 5. Apply Visual Markers (ONLY FOR VISIBLE VIEWPORT PORTION) ---
         # Visualize all editable identifiers in the selection. Mark all words that we can modify with pretty light color
         self.mark_all_words(ed_self)
-        self.set_progress(-1)
+        
+        if ENABLE_BENCH_TIMER: 
+            t_now = time.perf_counter()
+            print(f"START_SYNC_EDIT 95% mark_all_words: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
+            t_prev = t_now 
+        if SHOW_PROGRESS: self.set_progress(-1)
 
         msg_status(_('Sync Editing: Click an ID to edit, click gutter icon or press Esc to exit.'))
         # restore caret but w/o selection
         restore_caret()
         
         # === PROFILING STOP: START_SYNC_EDIT ===
-        if ENABLE_PROFILING:
+        if ENABLE_PROFILING_inside_start_sync_edit:
             stop_profiling(pr_start, s_start, sort_key='cumulative', max_lines=200, title='PROFILE: start_sync_edit (Entry Mode)')
         # see wall-clock time (Python + native marker add + repaint)
         if ENABLE_BENCH_TIMER:
@@ -762,7 +801,7 @@ class Command:
         # Clear all markers
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
         ed_self.set_prop(PROP_MARKED_RANGE, (-1, -1))
-        self.set_progress(-1)
+        if SHOW_PROGRESS: self.set_progress(-1)
 
         # Hide gutter icon
         self.hide_gutter_icon(ed_self)
@@ -798,24 +837,16 @@ class Command:
         if not session.selected and not session.editing:
             return
 
-        # This finish_editing() is necessary for edge cases:
-        # - When the event sequence is unpredictable, currently cudatext in my tests always send on_caret event before on_click event so finish_editing runs in on_caret so we do not need it here, but if cudatext change the events orders we will need finish_editing here
-        # - When clicking on empty space while editing if on_click event come before on_caret (should not happen)
-        # on_caret handles ID-to-ID transitions smoothly, but this ensures we always reach a clean state before starting new editing
-        if session.editing:
-            self.finish_editing(ed_self)
-
         carets = ed_self.get_carets()
         if not carets:
             return
 
-        clicked_key = None
         caret = carets[0]
-        offset = 0
         clicked_x, clicked_y = caret[0], caret[1]
 
-        # Find which word was clicked
-        # Uses line index for O(1) lookup instead of scanning entire dictionary
+        # Find which word was clicked (fast O(1) lookup via line_index)
+        clicked_key = None
+        offset = 0
         if clicked_y in session.line_index:
             for token_ref, key in session.line_index[clicked_y]:
                 if clicked_x >= token_ref.start_x and clicked_x <= token_ref.end_x:
@@ -823,17 +854,46 @@ class Command:
                     offset = clicked_x - token_ref.start_x
                     break
 
+        # === PROFILING START: BENCHMARKING ID-to-ID SWITCH ===
+        is_switch = session.editing and clicked_key is not None
+        if is_switch:
+            # print(">>> ID-to-ID SWITCH START <<<")
+            if ENABLE_PROFILING_inside_on_click:
+                pr_switch, s_switch = start_profiling()
+            if ENABLE_BENCH_TIMER:
+                switch_start = time.perf_counter()
+        # ===================================================================
+
         # If click was NOT on a valid word
         # Not editing - in selection mode
         if not clicked_key:
-            msg_status(_('Sync Editing: Not a word! Click on ID to edit it.'))
+            if session.editing:
+                # User clicked outside while editing → finish editing normally (show colors again)
+                # this will never happen because we already called finish_editing inside on_caret which sets session.editing = False, because on_caret event always come before on_click events in cudatext, but if cudatext change this in the future then we are safe
+                self.finish_editing(ed_self)
+            # else:
+                # msg_status(_('Sync Editing: Not a word! Click on ID to edit it.'))
             return
 
-        # --- Start Editing Sequence ---
-        # Clear passive markers (background colors)
-        ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
+        # At this point we have a valid clicked_key → we are either:
+        #   1. Starting editing from selection mode, or
+        #   2. Switching directly from one ID to another ID (seamless, no colors flash)
+
+        # Seamless switch preparation: only clear markers + reset carets, NO mark_all_words()
+        if session.editing:
+            ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
+            # Reset to single caret at the clicked position (keeps caret where user clicked)
+            ed_self.set_caret(clicked_x, clicked_y, id=CARET_SET_ONE)
+            if is_switch:
+                if ENABLE_BENCH_TIMER:
+                    print(f">>> Switch phase 1 (finish old): {time.perf_counter() - switch_start:.4f}s")
+        else:
+            # First time entering editing mode → clear colored backgrounds
+            ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
+
+        # --- Start Editing Sequence (new word) ---
         session.our_key = clicked_key
-        session.original = (caret[0], caret[1])
+        session.original = (clicked_x, clicked_y)
 
         # Get visible line range
         line_top, line_bottom = self.get_visible_line_range(ed_self)
@@ -881,7 +941,18 @@ class Command:
         # Add secondary caret at the corresponding offset
         # Add carets to ALL instances (not just visible VIEWPORT ones)
         for y, x, off in all_carets:
-            ed_self.set_caret(x + off, y, id=CARET_ADD)
+            ed_self.set_caret(x + off, y, id=CARET_ADD, options=CARET_OPTION_NO_EVENT)
+
+        # === PROFILING STOP: BENCHMARKING ID-to-ID SWITCH ===
+        if is_switch:
+            if ENABLE_PROFILING_inside_on_click:
+                stop_profiling(pr_switch, s_switch, sort_key='cumulative', max_lines=200, title='PROFILE: ID-to-ID switch (on_click)')
+            if ENABLE_BENCH_TIMER:
+                phase2_time = time.perf_counter() - switch_start
+                total_switch_time = time.perf_counter() - switch_start
+                print(f">>> Switch phase 2 (setup new word): {phase2_time:.4f}s")
+                print(f">>> ID-to-ID SWITCH TOTAL TIME: {total_switch_time:.4f}s")
+        # ===================================================================
 
         # Update state
         session.selected = False
@@ -1101,7 +1172,6 @@ class Command:
         HEAVILY OPTIMIZED
         - Delta-based position updates (only shift what changed)
         - Line-based spatial index for O(1) lookups
-        - Handles collision (merging) when renaming variable to existing one.
         - In-place TokenRef updates (no tuple recreation)
         - Early exit when nothing changed
         - O(k) complexity where k = tokens per line
@@ -1178,8 +1248,8 @@ class Command:
             # === PROFILING STOP: REDRAW (No Change) ===
             if ENABLE_PROFILING_inside_redraw:
                 stop_profiling(pr_redraw, s_redraw, title='PROFILE: redraw (No Change)')
-            if ENABLE_BENCH_TIMER:
-                print(f"REDRAW (NO CHANGE): {time.perf_counter() - t0:.4f}s")
+            # if ENABLE_BENCH_TIMER:
+                # print(f"REDRAW (NO CHANGE): {time.perf_counter() - t0:.4f}s")
             # ==========================================
             return
 
@@ -1229,7 +1299,8 @@ class Command:
                     if other_ref.start_x > old_token_x:
                         other_ref.shift(delta)
 
-        # 4. Update dictionary keys if word changed, and also handle collisions (when we edit a word and create a new word that already existed before)
+        '''
+        # 4. met1: Update dictionary keys if word changed, and also handle collisions (when we edit a word and create a new word that already existed before, we merge both and consider them as one token so it become colorized with the same color), this seems the best thing but after more thinking i found it a bad idea, so i will use met2, see bellow. i keep code here to know/remember about this collision problem and why i took this decision because it is not obvious
         if old_key != new_key:
             # Handle collision if new_key already exists
             if new_key in session.dictionary:
@@ -1256,7 +1327,26 @@ class Command:
             session.our_key = new_key
         else:
             session.our_key = old_key
-
+        '''
+        
+        # 4. met2: Update dictionary keys if word changed, and do not handle collisions (when we edit a word and create a new word that already existed before we simply disable the old one, then user will have to restart sync edit session to include the diabled word), i found this safer because we should not fix user bugs, if user do not pay attention that he created a new word that already exist then why should we fix it for him? this is not a bug fixer plugin! so here we will simply consider the old word (which is similar to the new word) as a dead word so we do not colorize/edit it, this is safer.
+        if old_key != new_key:
+            session.dictionary[new_key] = edited_tokens
+            del session.dictionary[old_key]
+            
+            # Update line index references
+            for line_num in affected_lines:
+                if line_num in session.line_index:
+                    session.line_index[line_num] = [
+                        (ref, new_key if key == old_key else key) 
+                        for ref, key in session.line_index[line_num]
+                    ]
+            
+            session.our_key = new_key
+        else:
+            session.our_key = old_key
+            
+            
         # 5. Repaint borders ONLY FOR VISIBLE VIEWPORT PORTION
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
 
