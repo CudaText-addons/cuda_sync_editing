@@ -425,7 +425,9 @@ class Command:
         # Save coordinates and "Lock" the selection
         session.start_l, session.end_l = ed_self.get_sel_lines()
         session.selected = True
-
+        start_l = session.start_l
+        end_l = session.end_l
+        
         # Break text selection and clear visual selection to show markers instead
         ed_self.set_sel_rect(0,0,0,0)
 
@@ -434,7 +436,7 @@ class Command:
             self.show_gutter_icon(ed_self, session.gutter_icon_line, active=True)
 
         # Mark the range properties for CudaText
-        ed_self.set_prop(PROP_MARKED_RANGE, (session.start_l, session.end_l))
+        ed_self.set_prop(PROP_MARKED_RANGE, (start_l, end_l))
 
         # --- 2. Lexer / Parser Configuration ---
         # Instantiate config to get fresh values from disk on every session
@@ -509,6 +511,7 @@ class Command:
             t_prev = t_now
         if SHOW_PROGRESS: self.set_progress(60)
         
+        # Coordinate Correction
         x1, y1, x2, y2 = caret
         # Sort coords of caret
         if (y1, x1) > (y2, x2):
@@ -533,62 +536,95 @@ class Command:
             return
         
         # Pre-compute case sensitivity handler
-        key_normalizer = (lambda s: s.lower()) if not session.case_sensitive else (lambda s: s)
+        key_normalizer = (lambda s: s) if session.case_sensitive else (lambda s: s.lower())
         
-        # OPTIMIZATION: Cache style checks to avoid running Regex a lot of times
-        # Uses a dictionary style_cache to remember if a style is valid. Checks the dictionary (O(1)) instead of running Regex (O(N)) for every token.
-        style_cache = {}
-        def is_valid_style(style_str):
-            if style_str not in style_cache:
-                # Cache the boolean result
-                style_cache[style_str] = bool(include_re.match(style_str) and not exclude_re.match(style_str))
-            return style_cache[style_str]
+        # OPTIMIZATION: Pre-compile style checks once for all unique styles
+        # Build a set of all unique style strings first, then batch-check them
+        unique_styles = set()
+        if not session.use_simple_naive_mode:
+            for token in tokenlist:
+                unique_styles.add(token['style'])
+        
+        # Batch validate all unique styles at once (much faster than per-token)
+        style_cache = {
+            style: bool(include_re.match(style) and not exclude_re.match(style))
+            for style in unique_styles
+        }
 
-        # Step A: Build Dictionary First (Do not touch line_index yet)
+        # Step A: Build Dictionary AND Line Index simultaneously (single pass)
+        # OPTIMIZATION: Combine dictionary + line_index construction to avoid double iteration
         if session.use_simple_naive_mode:
-            # Naive Mode: Scan text purely by Regex, ignoring syntax context
-            for y in range(session.start_l, session.end_l+1):
+            # === NAIVE MODE (Regex Only) ===
+            # Naive Mode: Scan text purely by Regex, ignoring syntax context. This is generally faster as it bypasses ed.get_token
+            
+            for y in range(start_l, end_l+1):
                 cur_line = ed_self.get_text_line(y)
                 for match in session.regex_identifier.finditer(cur_line):
+                    mstart, mend = match.span()
+                    matchg = match.group()
                     # Drop tokens out of selection
-                    if y == session.start_l and match.start() < x1:
-                        continue
-                    if y == session.end_l and match.end() > x2:
-                        continue
-                    key = key_normalizer(match.group())
-                    token_ref = TokenRef(match.start(), y, match.end(), y, match.group(), 'id')
+                    if y == start_l and mstart < x1: continue
+                    if y == end_l and mend > x2: continue
+                    
+                    key = key_normalizer(matchg)
+                    token_ref = TokenRef(mstart, y, mend, y, matchg, 'id')
+                    
+                    # Build dict and line_index simultaneously
                     session.dictionary[key].append(token_ref)
+                    session.line_index[y].append((token_ref, key))
         else:
+            # === LEXER MODE (Syntax Aware) ===
             # Standard Lexer Mode: Filter tokens by Style (Variable, Function, etc.)
-
-            start_line = session.start_l
-            end_line = session.end_l
+            
+            # Process tokens with immediate TokenRef creation
             for token in tokenlist:
                 # A. Drop tokens outside of selection
-                if token['y1'] == start_line and token['x1'] < x1: continue
-                if token['y2'] == end_line and token['x2'] > x2: continue
+                if token['y1'] == start_l and token['x1'] < x1: continue
+                if token['y2'] == end_l and token['x2'] > x2: continue
                 
-                # B. Check if a token's style matches the allowed patterns (IDs) and rejects Keywords.
-                if not is_valid_style(token['style']):
+                # B. Check if a token's style matches the allowed patterns (IDs) and rejects Keywords (O(1) dict lookup)
+                if not style_cache.get(token['style'], False):
                     continue
                 
-                # C. Add to dictionary
+                # C. Add to dictionary AND line index in one pass
                 idd = key_normalizer(token['str'])
                 token_ref = TokenRef(token['x1'], token['y1'], token['x2'], token['y2'], token['str'], token['style'])
+                
+                # Build dict and line_index simultaneously
                 session.dictionary[idd].append(token_ref)
+                session.line_index[token['y1']].append((token_ref, idd))
         
         if ENABLE_BENCH_TIMER: 
             t_now = time.perf_counter()
-            print(f"START_SYNC_EDIT 60% Build dict: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
+            print(f"START_SYNC_EDIT 60% Build dict+line: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
             t_prev = t_now
-        if SHOW_PROGRESS: self.set_progress(65)
+        if SHOW_PROGRESS: self.set_progress(70)
         
-        # Step B: Remove Singletons (Clean garbage): We delete keys that don't have duplicates because sync editing requires at least 2 occurrences. (issue #44 and #45)
-        session.dictionary = {k: v for k, v in session.dictionary.items() if len(v) >= 2}
+        # Step B: Remove Singletons (Clean garbage) - OPTIMIZED with in-place filtering
+        # OPTIMIZATION: Filter dictionary and line_index simultaneously to avoid rebuilding line_index
+        keys_to_remove = [k for k, v in session.dictionary.items() if len(v) < 2]
+        
+        for key in keys_to_remove:
+            # Get tokens before deleting
+            singleton_tokens = session.dictionary[key]
+            del session.dictionary[key]
+            
+            # Remove from line_index (mark for removal)
+            for token_ref in singleton_tokens:
+                line_num = token_ref.start_y
+                if line_num in session.line_index:
+                    # Filter out this specific token_ref
+                    session.line_index[line_num] = [
+                        (ref, k) for ref, k in session.line_index[line_num] 
+                        if ref is not token_ref
+                    ]
+                    # Clean up empty line entries
+                    if not session.line_index[line_num]:
+                        del session.line_index[line_num]
         
         if ENABLE_BENCH_TIMER: 
             t_now = time.perf_counter()
-            print(f"START_SYNC_EDIT 65% remove dup: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
+            print(f"START_SYNC_EDIT 70% remove dup: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
             t_prev = t_now
         if SHOW_PROGRESS: self.set_progress(85)
         
@@ -605,39 +641,22 @@ class Command:
             # ====================================================
             return
 
-        # Step C: Build Line Index (Only for valid tokens)
-        # This is faster because we don't index tokens we just deleted
-        for key, tokens in session.dictionary.items():
-            for token_ref in tokens:
-                session.line_index[token_ref.start_y].append((token_ref, key))
-
-        if ENABLE_BENCH_TIMER: 
-            t_now = time.perf_counter()
-            print(f"START_SYNC_EDIT 85% build line: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
-            t_prev = t_now
-        if SHOW_PROGRESS: self.set_progress(90)
-
         # --- 4. Generate Color Map (once for entire session) ---
         # Pre-generate all colors to maintain consistency of colors when switching between View and Edit mode, so words will have the same color always inside the same session, and this reduce overhead also
+        # OPTIMIZATION: Batch color generation using dictionary comprehension (faster than loop)
         if session.use_colors:
+            session.word_colors = {
+                key: (((hash(key) & 0xFF0000) >> 16) % 127 + 128) |
+                     ((((hash(key) & 0x00FF00) >> 8) % 127 + 128) << 8) |
+                     (((hash(key) & 0x0000FF) % 127 + 128) << 16)
+                for key in session.dictionary
+            }
+        else:
             session.word_colors = {}
-            for key in session.dictionary:
-                # Deterministic hash-based color (Instant)
-                # Use string hash to generate RGB
-                h = hash(key)
-                r = (h & 0xFF0000) >> 16
-                g = (h & 0x00FF00) >> 8
-                b = (h & 0x0000FF)
-                # Force light pastel colors (High brightness/saturation)
-                r = (r % 127) + 128
-                g = (g % 127) + 128
-                b = (b % 127) + 128
-                col_int = r | (g << 8) | (b << 16)
-                session.word_colors[key] = col_int
 
         if ENABLE_BENCH_TIMER: 
             t_now = time.perf_counter()
-            print(f"START_SYNC_EDIT 90% gen colors: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
+            print(f"START_SYNC_EDIT 85% gen colors: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
             t_prev = t_now
         if SHOW_PROGRESS: self.set_progress(95)
         
