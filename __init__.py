@@ -1089,6 +1089,42 @@ class Command:
                 border_down=1
             )
 
+    def _cleanup_empty_word(self, ed_self, session, word_key):
+        """
+        Helper: Removes a word from dictionary and line_index if it was completely deleted (zero-length).
+        Returns True if the word was removed, False otherwise.
+        """
+        if not word_key:
+            return False
+            
+        tokens_list = session.dictionary.get(word_key)
+        if not tokens_list:
+            return False
+        
+        # Check if all tokens are zero-length (word was deleted)
+        all_empty = all(token_ref.text == '' or token_ref.start_x == token_ref.end_x 
+                        for token_ref in tokens_list)
+        
+        if all_empty:
+            # Word was completely deleted - remove from dictionary
+            affected_lines = set(token_ref.start_y for token_ref in tokens_list)
+            del session.dictionary[word_key]
+            
+            # Remove from line_index
+            for line_num in affected_lines:
+                if line_num in session.line_index:
+                    session.line_index[line_num] = [
+                        (ref, key) for ref, key in session.line_index[line_num]
+                        if key != word_key
+                    ]
+                    # Clean up empty line entries
+                    if not session.line_index[line_num]:
+                        del session.line_index[line_num]
+            
+            return True
+        
+        return False
+
     def finish_editing(self, ed_self, colorize=True):
         """
         Transitions the state from 'Editing' back to 'Selection/Viewing'.
@@ -1105,6 +1141,10 @@ class Command:
 
         # Remove the "Active Editing" markers (borders)
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
+
+        # Check if the word was deleted (empty/zero-length)
+        # If so, remove it from dictionary and line_index
+        self._cleanup_empty_word(ed_self, session, session.our_key)
 
         """
         SOLVE THE CARET POSITIONING PROBLEM:
@@ -1487,9 +1527,15 @@ class Command:
         #   1. Starting editing from selection mode, or
         #   2. Switching directly from one ID to another ID
 
-        # ID to ID switch preparation: only clear markers + reset carets, NO colorization with mark_all_words()
+        # ID to ID switch preparation: clean up previous word if it was deleted, then clear markers + reset carets, NO colorization with mark_all_words()
         if session.editing:
             # we clicked a valid ID, it may be a new one or the same edited one
+            
+            # Clean up the previous word if it was completely deleted
+            old_key = session.our_key
+            self._cleanup_empty_word(ed_self, session, old_key)
+            
+            # Clear markers and reset carets
             ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
             # Reset to single caret at the clicked position (keeps caret where user clicked)
             ed_self.set_caret(clicked_x, clicked_y, id=CARET_SET_ONE)
@@ -1976,7 +2022,7 @@ class Command:
 
         # CRITICAL FIX: Get old_length from the actual token, not from the key!
         # The token.text reflects the TRUE current state (can be empty "")
-        # This fixes the delta calculation when transitioning from empty to letter
+        # This fixes the delta calculation when transitioning from empty to letter (when user delete all the word and write again)
         old_length = len(edited_tokens[0].text) if edited_tokens else 0
         
         # Calculate Length Delta change
@@ -2009,7 +2055,7 @@ class Command:
                 token_ref.end_x = token_ref.start_x
                 token_ref.text = ''
             else:
-                # Find new position (may have shifted due to earlier edits on same line)
+                # Find new word position (may have shifted due to earlier edits on same line)
                 y_line = ed_self.get_text_line(line_num)
                 
                 # Scan backwards to find start of the new word instance from the adjusted position
@@ -2095,10 +2141,12 @@ class Command:
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
 
         if new_length == 0:
+            # === PROFILING STOP: REDRAW ===
             if ENABLE_PROFILING_inside_redraw:
                 stop_profiling(pr_redraw, s_redraw, sort_key='time', title='PROFILE: redraw (Empty)')
             if ENABLE_BENCH_TIMER:
                 print(f"REDRAW (EMPTY): {time.perf_counter() - t0:.4f}s")
+            # ==============================
             return
 
         # Get visible line range
