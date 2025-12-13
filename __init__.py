@@ -30,10 +30,10 @@ _ = get_translation(__file__)  # I18N
 
 
 # Set to True to enable code profiling (outputs to CudaText console).
-ENABLE_PROFILING = False
-ENABLE_PROFILING_inside_on_caret = False
-ENABLE_PROFILING_inside_redraw = False
-ENABLE_BENCH_TIMER = False # print real time spent, usefull when profiling is disabled because profiling adds more overhead
+ENABLE_PROFILING = True
+ENABLE_PROFILING_inside_on_caret = True
+ENABLE_PROFILING_inside_redraw = True
+ENABLE_BENCH_TIMER = True # print real time spent, usefull when profiling is disabled because profiling adds more overhead
 if ENABLE_BENCH_TIMER:
     import time
 
@@ -59,7 +59,7 @@ NON_STANDARD_LEXERS = {
 }
 
 # Lexers where we skip syntax parsing and just use Regex (Naive mode)
-# This is useful for plain text formats or where CudaText lexers doesn't output specific 'Id' styles.
+# This is useful for plain text formats or where CudaText lexers don't output specific 'Id' styles.
 NAIVE_LEXERS = [
   'Markdown', # it has 'Text' rule for many chars, including punctuation+spaces
   'reStructuredText',
@@ -154,23 +154,51 @@ def theme_color(name, is_font):
         return theme[name]['color_font' if is_font else 'color_back']
     return 0x808080
 
+class TokenRef:
+    """
+    Mutable token reference for efficient in-place updates. this is better than immutable tuples because it avoids recreation overhead during edits.
+    """
+    __slots__ = ['start_x', 'start_y', 'end_x', 'end_y', 'text', 'style']
+    
+    def __init__(self, start_x, start_y, end_x, end_y, text, style):
+        self.start_x = start_x
+        self.start_y = start_y
+        self.end_x = end_x
+        self.end_y = end_y
+        self.text = text
+        self.style = style
+    
+    def shift(self, delta):
+        """Shift position by delta characters (in-place update)."""
+        self.start_x += delta
+        self.end_x += delta
+
+
 class SyncEditSession:
     """
     Represents a single sync edit session for one file (tab).
     Each editor handle has its own instance of this class to maintain state isolation.
+    OPTIMIZED with spatial indexing for large files.
     """
     def __init__(self):
         self.selected = False
         self.editing = False
-        self.dictionary = {} # Stores mapping of { "word_string": [list_of_token_tuples_positions] }
-                             # Token tuple format: ((x1, y1), (x2, y2), string, style)
+        
+        # OPTIMIZATION: Line-based spatial index for O(1) line lookups
+        # Structure: { line_num: [(TokenRef, word_key)] }
+        # Allows fast queries like "what tokens are on line 42?"
+        self.line_index = defaultdict(list)
+        
+        # Dictionary stores TokenRef objects
+        # Structure: { word_key: [TokenRef objects] }
+        self.dictionary = defaultdict(list)
+        
         self.our_key = None  # The specific word currently being edited
         self.original = None # Original caret position before editing
         self.start_l = None  # Start line of selection
         self.end_l = None    # End line of selection
         self.gutter_icon_line = None     # Line where gutter icon is displayed
         self.gutter_icon_active = False  # Whether gutter icon is currently shown as active
-        self.line_lengths = {} # Track line lengths to detect edit deltas
 
         # Config ini
         self.use_colors = USE_COLORS_DEFAULT
@@ -182,8 +210,6 @@ class SyncEditSession:
 
         # Compiled regex objects
         self.regex_identifier = None
-        self.regex_style_include = None
-        self.regex_style_exclude = None
 
         # Marker colors
         self.marker_fg_color = None
@@ -312,13 +338,6 @@ class Command:
             else:
                 self.hide_gutter_icon(ed_self)
 
-    def token_style_ok(self, ed_self, s):
-        """Checks if a token's style matches the allowed patterns (IDs) and rejects Keywords."""
-        session = self.get_session(ed_self)
-        good = session.regex_style_include.fullmatch(s)
-        bad = session.regex_style_exclude.fullmatch(s)
-        return good and not bad
-
     def toggle(self, ed_self=None):
         """
         Main Entry Point - can be called from command or gutter click.
@@ -342,6 +361,7 @@ class Command:
         2. Scans text (via Lexer or Regex).
         3. Groups identical words.
         4. Applies visual markers (colors).
+        5. Builds spatial index for fast lookups.
 
         All configuration is read fresh from file/theme on every start so the user does not need to restart CudaText.
         """
@@ -388,15 +408,11 @@ class Command:
 
         self.set_progress(3)
         session.dictionary = defaultdict(list)
+        session.line_index = defaultdict(list)
 
         # Save coordinates and "Lock" the selection
         session.start_l, session.end_l = ed_self.get_sel_lines()
         session.selected = True
-
-        # Init line lengths
-        session.line_lengths = {}
-        for y in range(session.start_l, session.end_l + 1):
-            session.line_lengths[y] = len(ed_self.get_text_line(y))
 
         # Break text selection and clear visual selection to show markers instead
         ed_self.set_sel_rect(0,0,0,0)
@@ -447,18 +463,18 @@ class Command:
             session.regex_identifier = re.compile(IDENTIFIER_REGEX_DEFAULT)
 
         try:
-            session.regex_style_include = re.compile(session.identifier_style_include)
+            include_re = re.compile(session.identifier_style_include)
         except Exception:
             msg_status(_('Sync Editing: Invalid identifier_style_include config - using fallback'))
             print(_('ERROR: Sync Editing: Invalid identifier_style_include config - using fallback'))
-            session.regex_style_include = re.compile(local_styles_default)
+            include_re = re.compile(local_styles_default)
 
         try:
-            session.regex_style_exclude = re.compile(session.identifier_style_exclude)
+            exclude_re = re.compile(session.identifier_style_exclude)
         except Exception:
             msg_status(_('Sync Editing: Invalid identifier_style_exclude config - using fallback'))
             print(_('ERROR: Sync Editing: Invalid identifier_style_exclude config - using fallback'))
-            session.regex_style_exclude = re.compile(IDENTIFIER_STYLE_EXCLUDE_DEFAULT)
+            exclude_re = re.compile(IDENTIFIER_STYLE_EXCLUDE_DEFAULT)
 
         # NOTE: Do not use app_idle (set_progress) before EDACTION_LEXER_SCAN.
         # App_idle runs message processing which can conflict with parsing actions.
@@ -507,6 +523,7 @@ class Command:
         # Pre-compute case sensitivity handler
         key_normalizer = (lambda s: s.lower()) if not session.case_sensitive else (lambda s: s)
         
+        # OPTIMIZATION: Build both dictionary and line_index simultaneously
         if session.use_simple_naive_mode:
             # Naive Mode: Scan text purely by Regex, ignoring syntax context
             for y in range(session.start_l, session.end_l+1):
@@ -518,24 +535,32 @@ class Command:
                     if y == session.end_l and match.end() > x2:
                         continue
                     key = key_normalizer(match.group())
-                    # Create pseudo-token structure: ((x1, y1), (x2, y2), string, style)
-                    token = ((match.start(), y), (match.end(), y), match.group(), 'id')
-                    session.dictionary[key].append(token)
+                    token_ref = TokenRef(match.start(), y, match.end(), y, match.group(), 'id')
+                    session.dictionary[key].append(token_ref)
+                    session.line_index[y].append((token_ref, key))
         else:
             # Standard Lexer Mode: Filter tokens by Style (Variable, Function, etc.)
             for token in tokenlist:
-                if not self.token_style_ok(ed_self, token['style']):
+                # Check if a token's style matches the allowed patterns (IDs) and rejects Keywords.
+                style = token['style']
+                if not include_re.fullmatch(style) or exclude_re.fullmatch(style):
                     continue
                 
                 idd = key_normalizer(token['str'].strip())
-                # Structure: ((x1, y1), (x2, y2), string, style)
-                old_style_token = ((token['x1'], token['y1']), (token['x2'], token['y2']), token['str'], token['style'])
-                session.dictionary[idd].append(old_style_token)
+                token_ref = TokenRef(token['x1'], token['y1'], token['x2'], token['y2'], token['str'], token['style'])
+                session.dictionary[idd].append(token_ref)
+                session.line_index[token['y1']].append((token_ref, idd))
         
         self.set_progress(60)
         
         # Remove Singletons: We delete keys that don't have duplicates because sync editing requires at least 2 occurrences. (issue #44 and #45)
         session.dictionary = {k: v for k, v in session.dictionary.items() if len(v) >= 2}
+        
+        # Update line index to remove singletons
+        for line_num in list(session.line_index.keys()):
+            session.line_index[line_num] = [(ref, key) for ref, key in session.line_index[line_num] if key in session.dictionary]
+            if not session.line_index[line_num]:
+                del session.line_index[line_num]
 
         # Validation: Ensure we actually found words to edit. Exit if no id's (eg: comments and etc)
         if not session.dictionary:
@@ -588,13 +613,12 @@ class Command:
         """
         Visualizes all editable identifiers in the selection.
         Used during initialization and when returning to selection mode after an edit.
+        Uses batch marker operations for better performance.
         """
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
         session = self.get_session(ed_self)
         if not session.use_colors:
             return
-        
-        rand_color = randomcolor.RandomColor()
         
         # Collect all markers to add, sorted by (y, x)
         markers_to_add = []
@@ -603,11 +627,11 @@ class Command:
             # Get pre-generated color for this word
             color = session.word_colors.get(key, 0xFFFFFF)
             
-            for key_tuple in session.dictionary[key]:
+            for token_ref in session.dictionary[key]:
                 markers_to_add.append((
-                    key_tuple[0][1],  # y
-                    key_tuple[0][0],  # x
-                    key_tuple[1][0] - key_tuple[0][0],  # len
+                    token_ref.start_y,  # y
+                    token_ref.start_x,  # x
+                    token_ref.end_x - token_ref.start_x,  # len
                     color
                 ))
         
@@ -664,29 +688,44 @@ class Command:
         """
         Helper: Checks if the primary caret is strictly inside
         the boundaries of the word currently being edited.
-        
-        FIX: During Edit Mode, we ignore the regex check and rely purely on the geometric
-        bounds (x1, x2) stored in the dictionary, which are dynamically updated in `redraw`.
-        This allows non-identifier characters (like dots) to be included.
+        Uses line index for faster lookup.
         """
         session = self.get_session(ed_self)
-        if not session.our_key: return False
+        if not session.our_key:
+            return False
         carets = ed_self.get_carets()
-        if not carets: return False
+        if not carets:
+            return False
         x0, y0, x1, y1 = carets[0]
         
-        # We must rely on the geometric bounds stored in session.dictionary
-        active_instances = session.dictionary.get(session.our_key, [])
+        # Check line index first (O(1) lookup)
+        if y0 not in session.line_index:
+            return False
         
-        for key_tuple in active_instances:
-            start_pos, end_pos = key_tuple[0], key_tuple[1]
-            if y0 != start_pos[1]: continue
+        current_line = ed_self.get_text_line(y0)
+        
+        # Only check tokens on the current line
+        for token_ref, key in session.line_index[y0]:
+            if key != session.our_key:
+                continue
             
-            # Simple bounds check: is caret between start_x and end_x?
-            # Must include end_pos[0] because CudaText caret can be at the *end* of the word.
-            if x0 >= start_pos[0] and x0 <= end_pos[0]:
+            start_x = token_ref.start_x
+            if x0 < start_x:
+                continue
+
+            # Special Check: Allow caret to be at the immediate end of the word being typed.
+            # If the regex matches a string starting at start_x, and the caret is at the end of that match,
+            # we consider it "inside" so the user can continue typing. so this allow caret to stay considered "inside" while the token is being grown
+            if session.regex_identifier:
+                match = session.regex_identifier.match(current_line[start_x:]) if start_x <= len(current_line) else None
+                if match:
+                    dynamic_end = start_x + len(match.group(0))
+                    if x0 <= dynamic_end:
+                        return True
+
+            if x0 <= token_ref.end_x:
                 return True
-                
+        
         return False
 
     def reset(self, ed_self=None):
@@ -732,6 +771,7 @@ class Command:
         2. If Selection -> Check if click is on valid ID.
            - Yes: Start Editing (Add carets, borders).
            - No: Do nothing (Do not exit).
+        Uses spatial index for faster word lookups.
         """
         # OPTIMIZATION: exit early if sync edit mode is not active
         if not self.has_session(ed_self):
@@ -755,19 +795,16 @@ class Command:
         clicked_key = None
         caret = carets[0]
         offset = 0
+        clicked_x, clicked_y = caret[0], caret[1]
 
         # Find which word was clicked
-        for key in session.dictionary:
-            for key_tuple in session.dictionary[key]:
-                if  caret[1] >= key_tuple[0][1] \
-                and caret[1] <= key_tuple[1][1] \
-                and caret[0] <= key_tuple[1][0] \
-                and caret[0] >= key_tuple[0][0]:
+        # Uses line index for O(1) lookup instead of scanning entire dictionary
+        if clicked_y in session.line_index:
+            for token_ref, key in session.line_index[clicked_y]:
+                if clicked_x >= token_ref.start_x and clicked_x <= token_ref.end_x:
                     clicked_key = key
-                    offset = caret[0] - key_tuple[0][0]
+                    offset = clicked_x - token_ref.start_x
                     break
-            if clicked_key:
-                break
 
         # If click was NOT on a valid word
         # Not editing - in selection mode
@@ -783,11 +820,11 @@ class Command:
 
         # Collect all markers to add, sorted by (y, x)
         markers_to_add = []
-        for key_tuple in session.dictionary[session.our_key]:
+        for token_ref in session.dictionary[session.our_key]:
             markers_to_add.append((
-                key_tuple[0][1],  # y
-                key_tuple[0][0],  # x
-                key_tuple[1][0] - key_tuple[0][0],  # len
+                token_ref.start_y,  # y
+                token_ref.start_x,  # x
+                token_ref.end_x - token_ref.start_x,  # len
                 offset  # store offset for caret placement
             ))
         
@@ -870,16 +907,15 @@ class Command:
                     clicked_key = None
 
                     # Check if caret is on a valid ID
-                    for key in session.dictionary:
-                        for key_tuple in session.dictionary[key]:
-                            if  caret[1] >= key_tuple[0][1] \
-                            and caret[1] <= key_tuple[1][1] \
-                            and caret[0] <= key_tuple[1][0] \
-                            and caret[0] >= key_tuple[0][0]:
+                    # Use line index for fast lookup
+                    clicked_y = caret[1]
+                    clicked_x = caret[0]
+                    
+                    if clicked_y in session.line_index:
+                        for token_ref, key in session.line_index[clicked_y]:
+                            if clicked_x >= token_ref.start_x and clicked_x <= token_ref.end_x:
                                 clicked_key = key
                                 break
-                        if clicked_key:
-                            break
 
                     # If NOT on a valid ID, finish editing and show colors
                     if not clicked_key:
@@ -900,8 +936,8 @@ class Command:
             self.redraw(ed_self)
         
         # === PROFILING STOP: ON_CARET (End of function) ===
-        if ENABLE_PROFILING_inside_on_caret:
-            stop_profiling(pr_on_caret, s_on_caret, sort_key='cumulative', title='PROFILE: on_caret (End)')
+        # if ENABLE_PROFILING_inside_on_caret:
+            # stop_profiling(pr_on_caret, s_on_caret, sort_key='cumulative', title='PROFILE: on_caret (End)')
         # =================================================
 
     def on_key(self, ed_self, key, _state):
@@ -920,12 +956,18 @@ class Command:
     def redraw(self, ed_self):
         """
         Dynamically updates markers and dictionary positions during typing.
+        Because editing changes the length of the word, we must:
+        1. Find the new word string at the caret position.
+        2. Update the dictionary entry for the currently edited word (start/end positions).
+        3. Shift positions of ALL other words that exist on the same line after the caret.
+        4. Re-draw all the borders.
         
-        FIX: Geometry-Based Length Calculation.
-        The function now calculates the new word length based on the line length delta,
-        rather than relying on IDENTIFIER_REGEX_DEFAULT, which enables typing of non-identifier
-        characters (like '.' or '-'). The original, complex shifting logic is preserved
-        using the calculated per-instance delta (`inst_delta`).
+        HEAVILY OPTIMIZED
+        - Delta-based position updates (only shift what changed)
+        - Line-based spatial index for O(1) lookups
+        - In-place TokenRef updates (no tuple recreation)
+        - Early exit when nothing changed
+        - O(k) complexity where k = tokens per line
         """
         # === PROFILING START: REDRAW ===
         # Measures the time taken for recalculating positions on a keypress.
@@ -943,161 +985,137 @@ class Command:
             # ===========================================
             return
 
+        # 1. Capture State. Find out what changed on the first caret (on others changes will be the same)
         old_key = session.our_key
+        session.our_key = None # Temporarily unset to allow clean lookup
+
+        # Get current state at the first caret
         carets = ed_self.get_carets()
-        if not carets: 
+        if not carets: return
+        first_y = carets[0][1]
+        first_x = carets[0][0]
+        first_y_line = ed_self.get_text_line(first_y)
+        start_pos = first_x
+
+        # Backtrack from caret to find start of the new word
+        # Workaround for end of id case: If caret is at the very end, move back 1 to capture the match
+        if not session.regex_identifier.match(first_y_line[start_pos:]):
+            start_pos -= 1
+
+        # Move start_pos back until we find the beginning of the identifier
+        while start_pos >= 0 and session.regex_identifier.match(first_y_line[start_pos:]):
+            start_pos -= 1
+        start_pos += 1
+        # Workaround for EOL #65. Safety for EOL/BOL cases
+        if start_pos < 0:
+            start_pos = 0
+
+        # Check if word became empty (deleted). Workaround for empty id (eg. when it was deleted) #62
+        match = session.regex_identifier.match(first_y_line[start_pos:])
+        if not match:
+            # Word was deleted completely
+            session.our_key = old_key
+            ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
+            
             # === PROFILING STOP: REDRAW (Exit Early 2) ===
             if ENABLE_PROFILING_inside_redraw:
                 stop_profiling(pr_redraw, s_redraw, sort_key='cumulative', title='PROFILE: redraw (Live Typing - Exit Early 2)')
             # ===========================================
             return
 
-        cx, cy = carets[0][:2]
-        
-        # 1. Find Anchor Token and Calculate Deltas
-        
-        # Find the token instance currently being edited (the "anchor")
-        old_key_dictionary = session.dictionary.get(old_key, [])
-        candidates = [t for t in old_key_dictionary if t[0][1] == cy]
-        if not candidates: return
-            
-        # Find closest token to caret (the anchor token)
-        anchor_entry = min(candidates, key=lambda t: abs(t[0][0] - cx))
-        start_x = anchor_entry[0][0] # The starting X of the token before this edit
-
-        current_line_text = ed_self.get_text_line(cy)
-        
-        old_line_len = session.line_lengths.get(cy, len(current_line_text))
-        line_delta = len(current_line_text) - old_line_len
-        
-        # 2. Determine Per-Instance Delta (inst_delta)
-        # We must use the old_key_dictionary to count instances on the anchor line.
-        inst_count = sum(1 for t in old_key_dictionary if t[0][1] == cy)
-        
-        if inst_count == 0: return # Should not happen
-
-        # The key fix: CudaText applies the same change at every cursor.
-        # Total line delta is the sum of all changes. The change per instance is line_delta / inst_count.
-        inst_delta = line_delta // inst_count # Integer division is safe for single characters
-
-        old_len = len(old_key)
-        new_len = old_len + inst_delta 
-        
-        # 3. Handle Deletion (if new_len is 0 or less)
-        if new_len <= 0:
-            # Handle deletion of word
-            session.our_key = None
-            ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
-            session.dictionary.pop(old_key, None)
-            
-            # === PROFILING STOP: REDRAW (Exit Early 4) ===
-            if ENABLE_PROFILING_inside_redraw:
-                stop_profiling(pr_redraw, s_redraw, sort_key='cumulative', title='PROFILE: redraw (Live Typing - Exit Early 4)')
-            # ===========================================
-            return
-            
-        # 4. Extract New Key Geometrically
-        # Extract new key string directly from text using geometry (the new word might contain dots, dashes, etc.)
-        if start_x + new_len > len(current_line_text):
-             new_key_display = current_line_text[start_x:]
-             new_len = len(new_key_display)
-        else:
-             new_key_display = current_line_text[start_x : start_x + new_len]
-
+        new_key = match.group(0)
         if not session.case_sensitive:
-            new_key = new_key_display.lower() # Logic case
-        else:
-            new_key = new_key_display
+            new_key = new_key.lower()
 
-        # 5. Update Dictionary and Shift Positions (Only for the edited key)
-        
-        # If the key name changed, we need to create a new list for it, otherwise we update the old one.
+        # 2. Calculate Length Delta change
+        old_length = len(old_key)
+        new_length = len(new_key)
+        delta = new_length - old_length
+
+        # Early exit if nothing changed
+        if delta == 0 and old_key == new_key:
+            session.our_key = old_key
+            # === PROFILING STOP: REDRAW (No Change) ===
+            if ENABLE_PROFILING_inside_redraw:
+                stop_profiling(pr_redraw, s_redraw, title='PROFILE: redraw (No Change)')
+            if ENABLE_BENCH_TIMER:
+                print(f"REDRAW (NO CHANGE): {time.perf_counter() - t0:.4f}s")
+            # ==========================================
+            return
+
+        # Get all instances of edited word
+        edited_tokens = session.dictionary.get(old_key, [])
+        if not edited_tokens:
+            return
+
+        # Identify lines affected by this edit (where this word appears)
+        affected_lines = set()
+        for token_ref in edited_tokens:
+            affected_lines.add(token_ref.start_y)  # y coordinate
+
+        # 3. Rebuild Dictionary positions for the modified Active Word with new values
+        # Delta-based updates: For each edited token instance, apply delta and shift other tokens on same line
+        for token_ref in edited_tokens:
+            line_num = token_ref.start_y
+            old_token_x = token_ref.start_x
+            
+            # Find new position (may have shifted due to earlier edits on same line)
+            y_line = ed_self.get_text_line(line_num)
+            
+            # Scan backwards to find start of the new word instance from the adjusted position
+            # here we search for the token starting from its old position
+            search_x = old_token_x
+            while search_x >= 0 and session.regex_identifier.match(y_line[search_x:]):
+                search_x -= 1
+            search_x += 1
+            # Workaround for EOL #65
+            if search_x < 0:
+                search_x = 0
+            
+            # Update this token's position in-place
+            token_ref.start_x = search_x
+            token_ref.end_x = search_x + new_length
+            token_ref.text = new_key
+            
+            # 4. Shift other tokens on this line that come AFTER this token
+            # Only process tokens on the same line (using spatial index)
+            if delta != 0 and line_num in session.line_index:
+                for other_ref, other_key in session.line_index[line_num]:
+                    # Skip the token we just updated
+                    if other_ref is token_ref:
+                        continue
+                    
+                    # If other token comes after this one, shift it
+                    if other_ref.start_x > old_token_x:
+                        other_ref.shift(delta)
+
+        # Update dictionary keys if word changed
         if old_key != new_key:
-            # Pop old key, but keep the entries in memory for processing
-            old_entries_to_process = session.dictionary.pop(old_key, [])
-            if new_key not in session.dictionary:
-                session.dictionary[new_key] = []
+            session.dictionary[new_key] = edited_tokens
+            del session.dictionary[old_key]
+            
+            # Update line index references
+            for line_num in affected_lines:
+                if line_num in session.line_index:
+                    session.line_index[line_num] = [
+                        (ref, new_key if key == old_key else key) 
+                        for ref, key in session.line_index[line_num]
+                    ]
+            
+            session.our_key = new_key
         else:
-            old_entries_to_process = old_key_dictionary
+            session.our_key = old_key
 
-        new_entries = []
-        cumulative_line_shift = defaultdict(int)
-        
-        # Shift all instances of the word currently being edited
-        for p_start, p_end, str_old, style_old in old_entries_to_process:
-            ox, oy = p_start
-            
-            # This instance's new position starts at its old position + the cumulative shift applied by previous instances on this line.
-            nx = ox + cumulative_line_shift[oy]
-            
-            # The new entry uses the new position (nx), the new length, and the new display string
-            new_entries.append(((nx, oy), (nx + new_len, oy), new_key_display, style_old))
-            
-            # The shift for the next token on this line is inst_delta
-            cumulative_line_shift[oy] += inst_delta
-
-        session.dictionary[new_key] = new_entries
-        session.our_key = new_key # Update the active key
-        
-        # 6. Update Stored Line Lengths (Only the line being edited)
-        session.line_lengths[cy] = len(current_line_text)
-        
-        # 7. Shift Other Words (Crucial part that manages surrounding tokens)
-        
-        if inst_delta != 0:
-            # We iterate over the lines that were affected by the edits
-            for line_num, final_shift_on_line in cumulative_line_shift.items():
-                if final_shift_on_line == 0: continue
-                
-                # Check ALL other keys/tokens in the whole dictionary
-                for other_k in list(session.dictionary.keys()):
-                    if other_k == new_key: continue
-                    
-                    updated_items = []
-                    
-                    for item in session.dictionary.get(other_k, []):
-                        if item[0][1] != line_num:
-                             updated_items.append(item)
-                             continue
-
-                        ix = item[0][0] # Original X of the 'other' token
-
-                        # Calculate the total shift that should be applied to this token:
-                        # Sum of all 'inst_delta's from edited instances whose *original* start_x was < this token's *original* start_x.
-                        
-                        total_shift = 0
-                        
-                        # Use the original set of tokens (old_key_dictionary) for relative position check
-                        # Note: we use old_key_dictionary because it contains the unshifted starting positions (p_start[0]).
-                        for p_start, _, _, _ in old_key_dictionary:
-                             if p_start[1] == line_num and p_start[0] < ix:
-                                  total_shift += inst_delta
-                        
-                        if total_shift != 0:
-                            iy = item[0][1]
-                            new_item = (
-                                (item[0][0]+total_shift, iy),
-                                (item[1][0]+total_shift, iy),
-                                item[2],
-                                item[3]
-                            )
-                            updated_items.append(new_item)
-                        else:
-                            updated_items.append(item)
-                    
-                    # Update the dictionary entry for this 'other' key
-                    session.dictionary[other_k] = updated_items
-        
-        # 8. Repaint markers for the actively edited word
+        # 5. Repaint borders for ALL words
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
 
         # Collect all markers to add, sorted by (y, x)
         markers_to_add = []
-        for key_tuple in session.dictionary.get(session.our_key, []):
+        for token_ref in session.dictionary[session.our_key]:
             markers_to_add.append((
-                key_tuple[0][1],  # y
-                key_tuple[0][0],  # x
-                key_tuple[1][0] - key_tuple[0][0]  # len
+                token_ref.start_y,  # y
+                token_ref.start_x,  # x
+                token_ref.end_x - token_ref.start_x  # len
             ))
         
         # Sort markers by (y, x)
@@ -1122,7 +1140,7 @@ class Command:
             stop_profiling(pr_redraw, s_redraw, sort_key='time', max_lines=200, title='PROFILE: redraw (Live Typing)')
         if ENABLE_BENCH_TIMER:
             # see wall-clock time (Python + native marker add + repaint)
-            print(f"REDRAW: {time.perf_counter() - t0:.4f}s  instances={len(new_entries)}")
+            print(f"REDRAW: {time.perf_counter() - t0:.4f}s  edited_tokens={len(edited_tokens)}")
         # ==============================
 
     def config(self):
