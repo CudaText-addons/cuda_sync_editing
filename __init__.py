@@ -32,8 +32,8 @@ _ = get_translation(__file__)  # I18N
 ENABLE_PROFILING_inside_start_sync_edit = False
 ENABLE_PROFILING_inside_on_caret = False
 ENABLE_PROFILING_inside_redraw = False
-ENABLE_PROFILING_inside_on_click = True
-ENABLE_BENCH_TIMER = True # print real time spent, usefull when profiling is disabled because profiling adds more overhead
+ENABLE_PROFILING_inside_on_click = False
+ENABLE_BENCH_TIMER = False # print real time spent, usefull when profiling is disabled because profiling adds more overhead
 
 # --- Default Configuration ---
 USE_COLORS_DEFAULT = True
@@ -1006,7 +1006,7 @@ class Command:
                 border_down=1
             )
 
-    def finish_editing(self, ed_self):
+    def finish_editing(self, ed_self, colorize=True):
         """
         Transitions the state from 'Editing' back to 'Selection/Viewing'.
         Crucial for Continuous Editing: It saves the current state and re-enables
@@ -1029,14 +1029,15 @@ class Command:
             first_caret = carets[0]
             ed_self.set_caret(first_caret[0], first_caret[1], id=CARET_SET_ONE)
 
-        # Reset flags to 'Selection' mode
-        session.original = None
-        session.editing = False
+        # Reset flags to 'View/Selection' mode
         session.selected = True
+        session.editing = False
         session.our_key = None
+        session.original = None
 
         # Re-paint markers so user can see what else to edit (ONLY VISIBLE VIEWPORT PORTION)
-        self.mark_all_words(ed_self)
+        if colorize:
+            self.mark_all_words(ed_self)
 
     def caret_in_current_token(self, ed_self):
         """
@@ -1189,20 +1190,23 @@ class Command:
                 pr_switch, s_switch = start_profiling()
             if ENABLE_BENCH_TIMER:
                 switch_start = time.perf_counter()
-        # ===================================================================
+        # =====================================================
 
-        # If click was NOT on a valid word
-        # Not editing - in selection mode
+        # Did we click on a valid ID?
+        
         if not clicked_key:
+            # click was NOT on a valid ID
+            
             if session.editing:
-                # User clicked outside while editing → finish editing normally (show colors again)
-                # this will never happen because we already called finish_editing inside on_caret which sets session.editing = False, because on_caret event always come before on_click events in cudatext, but if cudatext change this in the future then we are safe
+                # User clicked outside while he was in editing mode → finish editing mode and show colors (return to selection/view mode)
+                # this will never happen (we will never reach this code) because we already called finish_editing inside on_caret which sets session.editing = False, because on_caret event always come before on_click events in cudatext, but if cudatext change this in the future (on_click event come before on_caret event) then we are safe
                 self.finish_editing(ed_self)
-            # else:
+            # else: 
+                # User clicked outside while he was in View/Selection mode
                 # msg_status(_('Sync Editing: Not a word! Click on ID to edit it.'))
             return
 
-        # At this point we have a valid clicked_key → we are either:
+        # At this point we have a valid ID clicked_key → we are either:
         #   1. Starting editing from selection mode, or
         #   2. Switching directly from one ID to another ID (seamless, no colors flash)
 
@@ -1215,12 +1219,10 @@ class Command:
                 if ENABLE_BENCH_TIMER:
                     print(f">>> Switch phase 1 (finish old): {time.perf_counter() - switch_start:.4f}s")
         else:
-            # First time entering editing mode → clear colored backgrounds
+            # we cliked a valid ID and we were in View/Selection mode, so First time entering Editing mode → clear colored backgrounds
             ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
 
-        # --- Start Editing Sequence (new word) ---
-        session.our_key = clicked_key
-        session.original = (clicked_x, clicked_y)
+        # --- Start Editing Mode (new word) ---
 
         # Get visible line range
         line_top, line_bottom = self.get_visible_line_range(ed_self)
@@ -1231,7 +1233,7 @@ class Command:
         all_carets = []
         markers_to_add = []
         
-        for token_ref in session.dictionary[session.our_key]:
+        for token_ref in session.dictionary[clicked_key]:
             # Add caret to ALL instances (editing must work on all words)
             all_carets.append((
                 token_ref.start_y,  # y
@@ -1247,7 +1249,7 @@ class Command:
                     token_ref.end_x - token_ref.start_x,  # len
                 ))
         
-        # Sort both lists by (y, x)
+        # Sort both lists by (y, x), sorting is very important, read in redraw() why
         all_carets.sort(key=lambda c: (c[0], c[1]))
         markers_to_add.sort(key=lambda m: (m[0], m[1]))
         
@@ -1279,11 +1281,13 @@ class Command:
                 total_switch_time = time.perf_counter() - switch_start
                 print(f">>> Switch phase 2 (setup new word): {phase2_time:.4f}s")
                 print(f">>> ID-to-ID SWITCH TOTAL TIME: {total_switch_time:.4f}s")
-        # ===================================================================
+        # ====================================================
 
-        # Update state
+        # Reset flags to 'Editing' mode, and Update state
         session.selected = False
         session.editing = True
+        session.our_key = clicked_key
+        session.original = (clicked_x, clicked_y)
 
     def on_click_gutter(self, ed_self, _state, nline, _nband):
         """
@@ -1331,58 +1335,117 @@ class Command:
         """
         # OPTIMIZATION: exit early if sync edit mode is not active
         # This should never happen since we only subscribe when active, but when sync edit is active in one tab then we must prevent this to run on other tabs if the user switch to another tab, otherwise we will create a session for every tab the user switch to it and of course will add overhead also, so we must keep this check
-        if not self.has_session(ed_self):
+        handle = self.get_editor_handle(ed_self)
+        if handle not in self.sessions: # inline has_session
+            return
+
+        # Now we know sync edit is active, get session and exit early if we are not in editing mode, view/selection mode should not be processed here (by on_caret) we do it in on_click
+        session = self.sessions[handle]
+        if not session.editing:
             return
         
-        # === PROFILING START: ON_CARET ===
-        if ENABLE_PROFILING_inside_on_caret:
-            pr_on_caret, s_on_caret = start_profiling()
-        # =================================
-        
-        # Now we know sync edit is active, get session
-        session = self.get_session(ed_self)
-
-        if session.editing:
-            if not self.caret_in_current_token(ed_self):
-                # Caret left current token - check if it's on another valid ID
-                carets = ed_self.get_carets()
-                if carets:
-                    caret = carets[0]
-                    clicked_key = None
-
-                    # Check if caret is on a valid ID
-                    # Use line index for fast lookup
-                    clicked_y = caret[1]
-                    clicked_x = caret[0]
-                    
-                    if clicked_y in session.line_index:
-                        for token_ref, key in session.line_index[clicked_y]:
-                            if clicked_x >= token_ref.start_x and clicked_x <= token_ref.end_x:
-                                clicked_key = key
-                                break
-
-                    # If NOT on a valid ID, finish editing and show colors
-                    if not clicked_key:
-                        self.finish_editing(ed_self)
-                    # If on a valid ID, do nothing - let on_click handle the transition
-                    # This prevents flashing colors when switching directly between IDs
-                else:
-                    self.finish_editing(ed_self)
-
-                # === PROFILING STOP: ON_CARET (Exit Editing) ===
-                if ENABLE_PROFILING_inside_on_caret:
-                    stop_profiling(pr_on_caret, s_on_caret, sort_key='cumulative', title='PROFILE: on_caret (Exit Editing)')
-                # ===============================================
+        # Now we are in Editing mode, and caret moved with keyboard or mouse, lets check if caret is still inside the edited word
+        if not self.caret_in_current_token(ed_self): # caret moved, are we still inside the word currently being edited?
+            # Caret left current token - check if it's on another valid ID
+            
+            # === PROFILING START: ON_CARET ===
+            if ENABLE_PROFILING_inside_on_caret:
+                pr_on_caret, s_on_caret = start_profiling()
+            # =================================
+            
+            carets = ed_self.get_carets()
+            if not carets:
+                self.finish_editing(ed_self)
                 return
+                
+            caret = carets[0]
+            clicked_x, clicked_y = caret[0], caret[1]
 
+            # Check if caret is on a valid ID
+            # Use line index for fast lookup
+            clicked_key = None
+            if clicked_y in session.line_index:
+                for token_ref, key in session.line_index[clicked_y]:
+                    if clicked_x >= token_ref.start_x and clicked_x <= token_ref.end_x:
+                        clicked_key = key
+                        break
+
+            if not clicked_key:
+                # caret is NOT on a valid ID, finish editing mode and show colors (return to selection/view mode)
+                self.finish_editing(ed_self)
+            # elif clicked_key != session.our_key:
+            else:
+                # ID to ID switch: caret is on a valid ID: 
+                # how can this happen? this happen only when user do direct click or 
+                # move caret with keyoard down/up keys and caret lands on another valid but
+                # different ID, like:
+                    # aaa ccc
+                    # ccc aaa  
+                    # if caret is on aaa and user move down the caret to ccc
+                # this will never happen when caret move by keyboard to left or right because two Id can never be adyacent without a non id like space..etc between them, in this case we will always return to Selection/View mode
+                # _____
+                # so now, should we continue in Editing mode and mark the new ID or should we return to Selection/View Mode and colorise all?
+                    # 1. if the caret movement was made by a mouse click, we must continue in Editing mode
+                    # 2. if the caret movement was made by the keyboard left/right arrows, i do not
+                    #    know what to choose:
+                        # A. continue in Editing mode like with mouse click
+                        # B. return to Selection/View mode and show colors, then the user 
+                        #    must click explicitly on an ID to enter in Edit mode again
+                    
+                # ====== METHOD1: ======
+                # choose 2.B. 
+                # i have to see if this caret movement was made by 
+                # a mouse click or keybord arrows, the problem is that we cannot 
+                # reliably distinguish keyboard from mouse click in on_caret event
+                # https://github.com/CudaText-addons/cuda_sync_editing/issues/7
+                # i have to use app_proc(PROC_GET_KEYSTATE and check for L (left click), 
+                # but i do not like it because:
+                    # 1. we already have problem of performance with big files, 
+                    #    and this solution will add more overhead
+                    # 2. if user use right click to do the clicks this will fail i think, 
+                    #    and if i check for left and right clicks then how can i know if 
+                    #    it was a desired click and not a context menu click? i don t know 
+                    #    with the current api, but in my tests it works fine for now
+                    
+                # ====== METHOD2: ======
+                # if i choose 2.A. (continue in Editing mode like with mouse click) then 
+                # things are easier, because we do not have to see if this caret movement 
+                # was made by a mouse click or keybord arrows.
+                # so we do nothing - we let on_click handle the transition. but this is 
+                # keyboard caret movement so on_click will not be called so we have to 
+                # invoke it manually with doclick()
+                
+                # i prefer METHOD2 its cleaner and safer, but if users ask for METHOD1 then
+                # the code is ready already
+                # use_METHOD1=False
+                use_METHOD1=True
+                
+                if use_METHOD1:
+                    # Check if this is a Mouse Action (Left or Right Button is pressed)
+                    pressed_keys = app_proc(PROC_GET_KEYSTATE, '')
+                    # print("pressed_keys",pressed_keys)
+                    is_mouse_click = ('L' in pressed_keys) or ('R' in pressed_keys)                    
+                    if is_mouse_click:
+                        # we used the MOUSE to switch to another ID, we assume the user 
+                        # might be clicking it to edit, so we do nothing, we let on_click handle it.
+                        pass
+                    else:
+                        # we used the KEYBOARD, return to Selection/View mode and show colors.
+                        print("========method1")
+                        self.finish_editing(ed_self, colorize=True)
+                else: # use METHOD2
+                    self.doclick()
+                
+
+            # === PROFILING STOP: ON_CARET (Exit Editing) ===
+            if ENABLE_PROFILING_inside_on_caret:
+                stop_profiling(pr_on_caret, s_on_caret, sort_key='cumulative', title='PROFILE: on_caret (Exit Editing)')
+            # ===============================================
+            
+        else: # caret moved, and it is still inside the word currently being edited
             # NOTE: self.redraw(ed_self) is called here to update word markers live during typing.
             # This recalculates borders and shifts other tokens on the line as the word grows/shrinks. This is a performance hit on simple caret moves (arrow keys) but necessary for live updates.
             self.redraw(ed_self)
-        
-        # === PROFILING STOP: ON_CARET (End of function) ===
-        # if ENABLE_PROFILING_inside_on_caret:
-            # stop_profiling(pr_on_caret, s_on_caret, sort_key='cumulative', title='PROFILE: on_caret (End)')
-        # =================================================
 
     def on_scroll(self, ed_self):
         """
@@ -1745,6 +1808,8 @@ class Command:
 
     def config(self):
         """Opens the plugin configuration INI file."""
+        session = self.get_session(ed)
+        print("self.word_colors",session.word_colors)
         print("self.sessions",self.sessions)
         print("self.pending_lexer_parse_handles",self.pending_lexer_parse_handles)
         try:
