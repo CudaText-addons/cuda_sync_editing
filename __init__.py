@@ -256,7 +256,33 @@ class Command:
         self.icon_active = -1
         self.pending_delay_handles = set() # Track editors waiting for the 600ms lexer delay timer
         self.pending_lexer_parse_handles = set()  # Track editors waiting for lexer parsing notification
+        self.active_scroll_handles = set() # Track editors with active sync sessions (for on_scroll event)
 
+    def _update_event_subscriptions(self):
+        """
+        central event subscription management method
+        Central method to manage all dynamic event subscriptions.
+        Coordinates on_lexer_parsed and on_scroll based on current plugin state.
+        
+        This ensures:
+        - on_lexer_parsed is active when editors are waiting for lexer parsing
+        - on_scroll is active when editors have active sync sessions
+        - Events are properly combined and don't conflict
+        
+        this necesary for now, once PROC_GET_EVENTS https://github.com/Alexey-T/CudaText/issues/6138 is implemented this can be simplified 
+        """
+        events_needed = []
+        
+        # Add on_lexer_parsed if any editor is waiting for lexer parsing
+        if self.pending_lexer_parse_handles:
+            events_needed.append('on_lexer_parsed')
+        
+        # Add on_scroll if any editor has an active sync session
+        if self.active_scroll_handles:
+            events_needed.append('on_scroll')
+        
+        # Update subscriptions (preserves install.inf events)
+        set_events_safely(events_needed)
 
     def get_editor_handle(self, ed_self):
         """Returns a unique identifier for the editor."""
@@ -295,11 +321,16 @@ class Command:
             self.icon_active = imagelist_proc(_h_im, IMAGELIST_ADD, value=ICON_ACTIVE_PATH)
 
     def on_close(self, ed_self):
+        """
+        Called when editor is closed.
+        Delegates to reset() for proper cleanup of all state.
+        """
         handle = self.get_editor_handle(ed_self)
+        # Clean up icon tracking
         if handle in self.inited_icon_eds:
             # print('Sync Editing: Forget handle')
             self.inited_icon_eds.remove(handle)
-        self.remove_session(ed_self)
+        self.reset(ed_self, cleanup_lexer_events=True)
 
     def on_open_reopen(self, ed_self):
         """
@@ -408,10 +439,10 @@ class Command:
         self.pending_lexer_parse_handles.remove(handle)
         
         # Unsubscribe from on_lexer_parsed ONLY if no more editors are waiting. This keeps the event active for other editors still parsing
-        if not self.pending_lexer_parse_handles:
-            set_events_safely([])
-        
-        # i prefer show a message alert than running the sync edit, because if the user is already editing inside sync edit and we refresh he will not understand what happened and we may break what he is writing, so a message alert is more safe and inform the user of the problem
+        # Use central event management instead of direct call to set_events_safely([]) to preserve other event from other editors like on_scroll/on_lexer_parsed
+        self._update_event_subscriptions()
+    
+        # i prefer to show a message alert than running the sync edit, because if the user is already editing inside sync edit and we refresh he will not understand what happened and we may break what he is writing, so a message alert is more safe and inform the user of the problem
         # msg_status(_("Sync Editing: Lexer parsed. Starting..."))
         # self.start_sync_edit(ed_self, allow_timer=False)
         
@@ -506,10 +537,11 @@ class Command:
             self.pending_lexer_parse_handles.add(handle)
             
             # Subscribe to on_lexer_parsed event for files that take longer than 600ms to parse
-            set_events_safely(['on_lexer_parsed'])
-            
-            # Clean up visual elements but DON'T unsubscribe from events
-            self.reset(ed_self, cleanup_events=False)
+            # Use central event management to preserve on_scroll from other editors
+            self._update_event_subscriptions()
+
+            # Clean up visual elements but DON'T unsubscribe from the lexer events we just subscribed above
+            self.reset(ed_self, cleanup_lexer_events=False)
             
             msg_status(_('Sync Editing: delay start for 600ms for safety'))
             return
@@ -648,8 +680,9 @@ class Command:
             tokenlist = ed_self.get_token(TOKEN_LIST_SUB, start_l, end_l) or []
             
             if not tokenlist:
-                self.reset(ed_self)
-                msg_status(_('Sync Editing: No syntax tokens found in selection'))
+                # here we cannot simply call self.reset(ed_self) because it will remove on_lexer_parsed event, and this is not always wanted, for example if the user clicked the gutter icon to activate sync edit mode on a big file, cudatext will take some time to finish lexer token parsing so tokenlist will be empty because get_token(TOKEN_LIST_SUB returns nothing, in this case if we call self.reset(ed_self) we will reset on_lexer_parsed and when cudatext finishes its tokens parsing the user will not receive the alert to restart the sync edit session and will think that the plugin is bugged or that his document have no duplicates. so here we must reset but use cleanup_lexer_events=False arg to prevent removing on_lexer_parsed. but this means also that on_lexer_parsed will keep active if the file is small because cudatext send on_lexer_parsed event only if parsing take more than 600ms, so in this case on_lexer_parsed will not be reset so when the user open another big file he will receive on_lexer_parsed, but this is not bad because in on_lexer_parsed() function we check if the editor is registred to receive on_lexer_parsed event, so it is safe to leave on_lexer_parsed active
+                self.reset(ed_self, cleanup_lexer_events=False)
+                msg_status(_('Sync Editing: No syntax tokens found, or Lexer Parsing not finished yet...'))
                 if SHOW_PROGRESS: self.set_progress(-1)
                 restore_caret()
                 
@@ -775,6 +808,11 @@ class Command:
         total_elapsed_time = time.perf_counter() - t0
         msg_summary = _(f'Sync Editing: Click ID to edit or Icon/Esc to exit. IDs={unique_duplicates_count}, Dups={total_duplicates_count}  ({total_elapsed_time:.3f}s)')
         msg_status(msg_summary)
+        
+        # Subscribe to on_scroll event for this editor
+        handle = self.get_editor_handle(ed_self)
+        self.active_scroll_handles.add(handle)
+        self._update_event_subscriptions()
         
         # restore caret but w/o selection
         restore_caret()
@@ -918,35 +956,37 @@ class Command:
         
         return False
 
-    def reset(self, ed_self=None, cleanup_events=True):
+    def reset(self, ed_self=None, cleanup_lexer_events=True):
         """
         FULLY Exits the plugin.
         Clears markers, releases selection lock, and resets all state variables.
         Triggered via 'Toggle' command, gutter icon click, or 'ESC' key.
         
         Args:
-            ed_self: Editor instance
-            cleanup_events: If True, clean up event subscriptions. If False, keep events active
-                           (used during lexer parsing delay where we need events to persist)
+            - ed_self: Editor instance
+            - cleanup_lexer_events: If True, clean up lexer event subscriptions. If False, keep lexer events active (used during lexer parsing delay where we need events to persist).
+            NOTE: Scroll events are ALWAYS cleaned up regardless.
         """
         if ed_self is None:
             ed_self = ed
         session = self.get_session(ed_self)
+        handle = self.get_editor_handle(ed_self)
+        
+        # ALWAYS clean up scroll tracking (session is ending)
+        self.active_scroll_handles.discard(handle)
         
         # Clean up lexer parsing tracking only if requested
-        if cleanup_events:
-            handle = self.get_editor_handle(ed_self)
-            
-            # Clean up any pending timers
+        if cleanup_lexer_events:
+            # Clean up any pending lexer timers
             timer_proc(TIMER_STOP, self.lexer_timer, interval=0, tag=str(handle))
             self.pending_delay_handles.discard(handle)
             
             self.pending_lexer_parse_handles.discard(handle)
             
-            # Unsubscribe from on_lexer_parsed if no more editors are waiting
-            if not self.pending_lexer_parse_handles:
-                set_events_safely([])
-        
+        # Update event subscriptions
+        # here we unsubscribe from on_lexer_parsed if no more editors are waiting, and on_scroll if no other editor need it
+        self._update_event_subscriptions()
+    
         # Restore original position if needed
         if session.original:
             ed_self.set_caret(session.original[0], session.original[1], id=CARET_SET_ONE)
