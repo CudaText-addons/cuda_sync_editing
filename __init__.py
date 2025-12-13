@@ -388,9 +388,6 @@ class Command:
             # print('Sync Editing: Forget handle')
             self.inited_icon_eds.remove(handle)
         
-        # Clean up selection scroll tracking before reset
-        self.selection_scroll_handles.discard(handle)
-        
         self.reset(ed_self, cleanup_lexer_events=True)
 
     def on_open_reopen(self, ed_self):
@@ -614,9 +611,15 @@ class Command:
             return
         caret = carets[0]
 
-        def restore_caret():
-            ed_self.set_caret(caret[0], caret[1])
-
+        def restore_caret(caret, keep_selection=False):
+            if keep_selection:
+                # FAILURE CASE: Restore exact previous state (caret + selection)
+                ed_self.set_caret(caret[0], caret[1], 
+                    caret[2], caret[3], id=CARET_SET_ONE)
+            else:
+                # SUCCESS CASE: Keep caret position, but clear selection range (-1)
+                ed_self.set_caret(caret[0], caret[1], -1, -1, id=CARET_SET_ONE)
+                
         original = ed_self.get_text_sel()
 
         # Check if we have selection of text
@@ -802,7 +805,8 @@ class Command:
                 # self.reset(ed_self)
                 msg_status(_('Sync Editing: No syntax tokens found, or Lexer Parsing not finished yet...'))
                 if SHOW_PROGRESS: self.set_progress(-1)
-                restore_caret()
+                # keep_selection=True because we are aborting
+                restore_caret(caret, keep_selection=True)
                 
                 # === PROFILING STOP: START_SYNC_EDIT (Exit Early) ===
                 if ENABLE_PROFILING_inside_start_sync_edit:
@@ -882,7 +886,8 @@ class Command:
             self.reset(ed_self)
             msg_status(_('Sync Editing: No editable identifiers found in selection'))
             if SHOW_PROGRESS: self.set_progress(-1)
-            restore_caret()
+            # keep_selection=True because we are aborting
+            restore_caret(caret, keep_selection=True)
             
             # === PROFILING STOP: START_SYNC_EDIT (Exit Early) ===
             if ENABLE_PROFILING_inside_start_sync_edit:
@@ -935,7 +940,8 @@ class Command:
         self._update_event_subscriptions()
         
         # restore caret but w/o selection
-        restore_caret()
+        # keep_selection=False (default) because markers are now active
+        restore_caret(caret, keep_selection=False)
         
         # === PROFILING STOP: START_SYNC_EDIT ===
         if ENABLE_PROFILING_inside_start_sync_edit:
