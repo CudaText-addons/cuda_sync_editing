@@ -1187,56 +1187,46 @@ class Command:
         carets = ed_self.get_carets()
         if not carets:
             return False
-            
-        # x0, y0, x1, y1 = carets[0]
         
+        # Get the caret position that corresponds to the originally clicked occurrence
         idx = session.original_occurrence_index
-        # why we check for idx < len(carets)? when we switch from id to id with mouse click the multicaret first become 1 caret, so carets[idx] will gave IndexError because carets no longuer exist, so we have to use a fallback carets[0]
-        if idx < len(carets):
+        if idx is not None and idx < len(carets):
             x0, y0 = carets[idx][0], carets[idx][1]
         else:
             x0, y0, _, _ = carets[0]
-            
-            
-        # fix case when caret leave the line like in:
-            # aaa| ccc
-            # ccc aaa| <==== move this caret
-            # aaa| ccc
-        # we get:
-            # aaa |ccc
-            # ccc aaa
-            # |aaa |ccc
-        # so if caret leave the original line of the edited word we consider the caret outside the token
-        if not y0 == session.original[1]:
+        
+        # Get the current position of the originally clicked token from our dictionary
+        # This is the source of truth for where the token actually is after edits
+        if session.our_key not in session.dictionary:
             return False
         
-        # Check line index first (O(1) lookup)
-        if y0 not in session.line_index:
+        edited_tokens = session.dictionary[session.our_key]
+        if idx is None or idx >= len(edited_tokens):
             return False
         
-        current_line = ed_self.get_text_line(y0)
+        # Get the token that corresponds to the originally clicked occurrence
+        original_token = edited_tokens[idx]
         
-        # Only check tokens on the current line
-        for token_ref, key in session.line_index[y0]:
-            if key != session.our_key:
-                continue
-            
-            start_x = token_ref.start_x
-            if x0 < start_x:
-                continue
-
-            # Special Check: Allow caret to be at the immediate end of the word being typed.
-            # If the regex matches a string starting at start_x, and the caret is at the end of that match,
-            # we consider it "inside" so the user can continue typing. so this allow caret to stay considered "inside" while the token is being grown
-            if session.regex_identifier:
-                match = session.regex_identifier.match(current_line[start_x:]) if start_x <= len(current_line) else None
+        # The caret must be on the same line as the original token
+        if y0 != original_token.start_y:
+            return False
+        
+        # Check if caret is within the current boundaries of the original token
+        # This accounts for the token growing/shrinking during typing
+        if x0 >= original_token.start_x and x0 <= original_token.end_x:
+            return True
+        
+        # Special case: Allow caret to be ONE position past the end (for continued typing)
+        # But verify with regex that we're actually at the end of a valid identifier
+        if x0 == original_token.end_x + 1 and session.regex_identifier:
+            current_line = ed_self.get_text_line(y0)
+            if original_token.start_x <= len(current_line):
+                match = session.regex_identifier.match(current_line[original_token.start_x:])
                 if match:
-                    dynamic_end = start_x + len(match.group(0))
-                    if x0 <= dynamic_end:
+                    # Verify the match ends exactly where we are
+                    matched_end = original_token.start_x + len(match.group(0))
+                    if x0 <= matched_end:
                         return True
-
-            if x0 <= token_ref.end_x:
-                return True
         
         return False
 
