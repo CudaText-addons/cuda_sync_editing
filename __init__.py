@@ -400,6 +400,8 @@ class Command:
         We must fully exit sync editing to avoid crashes or visual glitches.
         """
         if self.has_session(ed_self):
+            handle = self.get_editor_handle(ed_self)
+            self.lexer_parsed_message_shown.discard(handle)
             self.reset(ed_self)
             
     def show_gutter_icon(self, ed_self, line_index, active=False):
@@ -647,7 +649,9 @@ class Command:
             timer_proc(TIMER_START_ONE, self.lexer_timer, interval=600, tag=str(handle))
             
             # Track this editor for lexer parsing notification (fires only if parsing >600ms)
-            self.pending_lexer_parse_handles.add(handle)
+            # if we already showed the message box then we should not show it again so we do not need to subscribe to on_lexer_parsed in that case
+            if handle not in self.lexer_parsed_message_shown:
+                self.pending_lexer_parse_handles.add(handle)
             
             # Subscribe to on_lexer_parsed event for files that take longer than 600ms to parse
             # Use central event management to preserve on_scroll from other editors
@@ -1104,7 +1108,8 @@ class Command:
             self.pending_lexer_parse_handles.discard(handle)
 
             # Clear message tracking when fully resetting
-            self.lexer_parsed_message_shown.discard(handle)
+            # after a lot of thinking and attempts to solve the problem of cudatext sending on_lexer_parsed events even when the token parsing already finished, i decided to never delete the handles of the editors that already showed the message box here, the set is small anyway so it does not matter if we keep it, we discard the handle from lexer_parsed_message_shown only in on_open_reopen so the message box will appear again only if the user reloads the file; so never reset this here
+            # self.lexer_parsed_message_shown.discard(handle)
 
         # Update event subscriptions
         # here we unsubscribe from on_lexer_parsed if no more editors are waiting, on_scroll if no other editor need it, and on_caret if no other editor needs it
