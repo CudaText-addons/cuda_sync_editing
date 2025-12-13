@@ -30,10 +30,10 @@ _ = get_translation(__file__)  # I18N
 
 
 # Set to True to enable code profiling (outputs to CudaText console).
-ENABLE_PROFILING = False
-ENABLE_PROFILING_inside_on_caret = False
-ENABLE_PROFILING_inside_redraw = False
-ENABLE_BENCH_TIMER = False # print real time spent, usefull when profiling is disabled because profiling adds more overhead
+ENABLE_PROFILING = True
+ENABLE_PROFILING_inside_on_caret = True
+ENABLE_PROFILING_inside_redraw = True
+ENABLE_BENCH_TIMER = True # print real time spent, usefull when profiling is disabled because profiling adds more overhead
 if ENABLE_BENCH_TIMER:
     import time
 
@@ -188,6 +188,7 @@ class SyncEditSession:
         self.marker_fg_color = None
         self.marker_bg_color = None
         self.marker_border_color = None
+        self.word_colors = {}  # Cache of {word: color} to maintain consistent colors and reduce overhead
 
 
 class Command:
@@ -545,7 +546,17 @@ class Command:
 
         self.set_progress(90)
 
-        # --- 4. Apply Visual Markers ---
+        # --- 4. Generate Color Map (once for entire session) ---
+        # Pre-generate all colors to maintain consistency of colors when switching between View and Edit mode, so words will have the same color always inside the same session, and this reduce overhead also
+        if session.use_colors:
+            session.word_colors = {}
+            rand_color = randomcolor.RandomColor()
+            for key in session.dictionary:
+                session.word_colors[key] = html_color_to_int(rand_color.generate(luminosity='light')[0])
+
+        self.set_progress(95)
+        
+        # --- 5. Apply Visual Markers ---
         # Visualize all editable identifiers in the selection. Mark all words that we can modify with pretty light color
         self.mark_all_words(ed_self)
         self.set_progress(-1)
@@ -583,8 +594,9 @@ class Command:
         markers_to_add = []
         
         for key in session.dictionary:
-            # Generate unique color for every unique word
-            color  = html_color_to_int(rand_color.generate(luminosity='light')[0])
+            # Get pre-generated color for this word
+            color = session.word_colors.get(key, 0xFFFFFF)
+            
             for key_tuple in session.dictionary[key]:
                 markers_to_add.append((
                     key_tuple[0][1],  # y
