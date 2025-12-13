@@ -1021,8 +1021,15 @@ class Command:
         
         # restore caret but w/o selection
         # keep_selection=False (default) because markers are now active
-        restore_caret(caret, keep_selection=False)
-        
+        # restore_caret(caret, keep_selection=False)
+
+        # when we select text and enable the sync mode the cursor jump to end of selection it should stay in the visible viewport
+        # Set caret to middle of visible viewport instead of end of selection
+        line_top = ed_self.get_prop(PROP_LINE_TOP)
+        line_bottom = ed_self.get_prop(PROP_LINE_BOTTOM)
+        middle_line = (line_top + line_bottom) // 2
+        ed_self.set_caret(0, middle_line, id=CARET_SET_ONE)
+
         # === PROFILING STOP: START_SYNC_EDIT ===
         if ENABLE_PROFILING_inside_start_sync_edit:
             stop_profiling(pr_start, s_start, sort_key='cumulative', max_lines=200, title='PROFILE: start_sync_edit (Entry Mode)')
