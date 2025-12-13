@@ -112,39 +112,83 @@ def parse_install_inf_events():
     
     return events_dict
 
-# Parse install.inf events and keys
-install_inf_events = parse_install_inf_events()
+
+# Check API version
+# this API introduced improved events managments: PROC_EVENTS_SUB/UNSUB, and now keys=sel,selreset for on_caret_slow works as expected too
+API_NEW = app_api_version() >= '1.0.471'
+
+# Parse install.inf events and keys ONLY if using Legacy API
+if not API_NEW:
+    install_inf_events = parse_install_inf_events()
+else:
+    install_inf_events = {}
+
 
 def set_events_safely(events_to_add, lexer_list=''):
     """
-    Set events while preserving those from install.inf. because PROC_SET_EVENTS resets all the events including those from install.inf (only events in plugins.ini are preserved).
+    Set events dynamically based on API version.
     
+    API >= 1.0.471:
+      - Uses PROC_EVENTS_SUB/UNSUB.
+      - Manages only dynamic events (on_lexer_parsed, on_scroll, on_caret).
+      - Static events in install.inf are preserved automatically by CudaText.
+      
+    API < 1.0.471:
+      - Uses PROC_SET_EVENTS.
+      - Merges install.inf events but FORCEFULLY STRIPS keys/filters 
+        (ignoring 'sel,selreset') to avoid old API bugs.
+        
     Args:
         events_to_add: Set or list of event names to add (without filter strings)
         lexer_list: Comma-separated lexer names (optional)
     """
-    # Combine install.inf events with new events
-    all_events = {}
     
-    # Add install.inf events with their filters
-    all_events.update(install_inf_events)
-    
-    # Add new events (without filters, will use empty string)
-    for event in events_to_add:
-        if event not in all_events:
-            all_events[event] = ''
-    
-    # Build event string with filters
-    # Format: "plugin_name;event1,event2;lexer_list;filter1,filter2"
-    # Only include filter strings for events that have non-empty filters
-    event_names = ','.join(all_events.keys())
-    
-    # Build filter string - only include non-empty filters
-    filter_list = [f for f in all_events.values() if f]
-    filter_strings = ','.join(filter_list) if filter_list else ''
-    
-    # print('PROC_SET_EVENTS', f"cuda_sync_editing;{event_names};{lexer_list};{filter_strings}")
-    app_proc(PROC_SET_EVENTS, f"cuda_sync_editing;{event_names};{lexer_list};{filter_strings}")
+    if API_NEW:
+        # --- NEW API LOGIC ---
+        
+        # 1. Define dynamic events managed by this plugin
+        DYNAMIC_EVENTS = {'on_lexer_parsed', 'on_scroll', 'on_caret'}
+        
+        # 2. Unsubscribe from dynamic events that are NOT in the needed list
+        # We must explicitly unsub to turn them off, otherwise they stick around.
+        current_needed = set(events_to_add)
+        to_unsub = [ev for ev in DYNAMIC_EVENTS if ev not in current_needed]
+        
+        if to_unsub:
+            app_proc(PROC_EVENTS_UNSUB, f'cuda_sync_editing;{",".join(to_unsub)}')
+            
+        # 3. Subscribe to the needed dynamic events
+        # Note: These dynamic events do not use filters in this context, so we pass empty filter args.
+        if events_to_add:
+            # Format: "module;event_list;lexer_list;filter_list"
+            events_str = ','.join(events_to_add)
+            app_proc(PROC_EVENTS_SUB, f'cuda_sync_editing;{events_str};{lexer_list};;')
+            
+    else:
+        # --- LEGACY API LOGIC ---
+        
+        # in the old API we have to set events while preserving those from install.inf. because PROC_SET_EVENTS resets all the events including those from install.inf (only events in plugins.ini are preserved).
+        # and also we should not use on_caret_slow keys filters like sel and selreset, the old API was buged, so when we parse install.inf we must remove them when we subscribe dynamically to on_caret_slow. this will not break this plugin because on_caret_slow events are suficient to detect text selections without using sel/selreset.
+        
+        # Combine install.inf events with new events
+        all_events = {}
+        
+        # Add install.inf events but FORCE empty filters (ignore keys like 'sel,selreset')
+        for ev in install_inf_events:
+            all_events[ev] = '' 
+        
+        # Add new events (without filters)
+        for event in events_to_add:
+            if event not in all_events:
+                all_events[event] = ''
+        
+        # Build event string
+        event_names = ','.join(all_events.keys())
+        
+        # Filter string is explicitly empty because we stripped keys from install.inf events
+        filter_strings = ''
+        
+        app_proc(PROC_SET_EVENTS, f"cuda_sync_editing;{event_names};{lexer_list};{filter_strings}")
 
 def bool_to_ini(value):
     return 'true' if value else 'false'
@@ -1533,9 +1577,14 @@ class Command:
 
     def on_caret_slow(self, ed_self):
         """
-        Called when caret stops moving (debounced caret event).
         Handles gutter icon visibility based on selection state.
-        Only active when NOT in sync edit mode (lightweight).
+        Only active when NOT in sync Edit Mode (lightweight).
+        
+        - Called when user make a selection or cancel the selection (when using keys=sel,selreset)
+        - Called when caret stops moving (when not using keys=sel,selreset).
+        
+        - before api 1.0.470 this event is called for every slow caret
+        - after api 1.0.470 and using keys=sel,selreset, this event is called only when the user makes a selection or cancel the selection, so the plugin now practically consumes no resources while it is not used
         """
         # Only handle gutter icon when NOT in active sync edit mode
         if not self.has_session(ed_self):
