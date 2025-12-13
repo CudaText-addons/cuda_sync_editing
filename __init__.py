@@ -78,6 +78,25 @@ SCROLL_DEBOUNCE_DELAY = 150  # milliseconds to wait after scroll stops
 
 SHOW_PROGRESS=True
 
+_mydir = os.path.dirname(__file__)
+filename_install_inf = os.path.join(_mydir, 'install.inf')
+
+_events_str = ini_read(filename_install_inf, 'item1', 'events', '')
+install_inf_events = {ev.strip() for ev in _events_str.split(',') if ev.strip()}
+
+def set_events_safely(events_to_add, lexer_list='', filter_str=''):
+    """
+    Set events while preserving those from install.inf. because PROC_SET_EVENTS resets all the events including those from install.inf (only events in plugins.ini are preserved).
+    
+    Args:
+        events_to_add: Set or list of event names to add
+        lexer_list: Comma-separated lexer names (optional)
+        filter_str: Filter parameter for certain events (optional)
+    """
+    all_events = install_inf_events | set(events_to_add)
+    event_list_str = ','.join(all_events)    
+    app_proc(PROC_SET_EVENTS, f"cuda_sync_editing;{event_list_str};{lexer_list};{filter_str}")
+
 def bool_to_ini(value):
     return 'true' if value else 'false'
 
@@ -235,6 +254,8 @@ class Command:
         self.inited_icon_eds = set()
         self.icon_inactive = -1
         self.icon_active = -1
+        self.pending_delay_handles = set() # Track editors waiting for the 600ms lexer delay timer
+
 
     def get_editor_handle(self, ed_self):
         """Returns a unique identifier for the editor."""
@@ -353,7 +374,7 @@ class Command:
             return
 
         # Otherwise, start sync editing
-        self.start_sync_edit(ed_self)
+        self.start_sync_edit(ed_self, allow_timer=True)
 
     def get_visible_line_range(self, ed_self):
         """
@@ -364,7 +385,33 @@ class Command:
         line_bottom = ed_self.get_prop(PROP_LINE_BOTTOM)
         return (line_top, line_bottom)
 
-    def start_sync_edit(self, ed_self):
+    def on_lexer_parsed(self, ed_self):
+        """Event handler for when lexer finishes parsing"""
+        print("event fired",ed_self)
+        set_events_safely([])
+        # msg_status(_("Sync Editing: Lexer parsed. Starting..."))
+        # self.start_sync_edit(ed_self, allow_timer=False)
+        msg_box(f"Sync Editing: CudaText lexer parsing has just completed. This often occurs with large files, you should restart the current Sync Edit session to ensure all duplicated identifiers are correctly found. To restart, click the gutter icon or press Esc, then click the gutter icon again.", MB_OK + MB_ICONINFO)
+
+    def lexer_timer(self, tag='', info=''):
+        """600ms timer callback"""
+        if not tag:
+            return
+        try:
+            h_ed = int(tag)
+        except ValueError:
+            return
+
+        if h_ed not in self.pending_delay_handles:
+            return
+
+        self.pending_delay_handles.remove(h_ed)
+
+        ed = Editor(h_ed)
+        if ed.get_prop(PROP_HANDLE_SELF): # Editor may have been closed in the meantime
+            self.start_sync_edit(ed, allow_timer=False)
+
+    def start_sync_edit(self, ed_self, allow_timer=False):
         """
         Starts sync editing session.
         1. Validates selection.
@@ -376,29 +423,14 @@ class Command:
 
         All configuration is read fresh from file/theme on every start so the user does not need to restart CudaText.
         """
-        # === PROFILING START: START_SYNC_EDIT ===
-        if ENABLE_PROFILING_inside_start_sync_edit:
-            pr_start, s_start = start_profiling()
-        # ========================================
-
-        msg_status(_('Sync Editing: Analyzing...'))
-        t0 = time.perf_counter()
-        t_prev = t0
-            
         session = self.get_session(ed_self)
-        # now that we created a session we should always call update_gutter_icon_on_selection before start_sync_edit to set gutter_icon_line (set by show_gutter_icon) which will be used in start_sync_edit to set the active gutter icon
-        # Update gutter icon before starting to ensure session.gutter_icon_line is set. This allows us to flip it to "Active" mode shortly after.
-        self.update_gutter_icon_on_selection(ed_self)
+
+        # --- 1. Initial basic checks ---
 
         carets = ed_self.get_carets()
         if len(carets) != 1:
             self.reset(ed_self)
             msg_status(_('Sync Editing: Need single caret'))
-            
-            # === PROFILING STOP: START_SYNC_EDIT (Exit Early) ===
-            if ENABLE_PROFILING_inside_start_sync_edit:
-                stop_profiling(pr_start, s_start, title='PROFILE: start_sync_edit (Entry Mode - Early Exit)')
-            # ====================================================
             return
         caret = carets[0]
 
@@ -407,22 +439,56 @@ class Command:
 
         original = ed_self.get_text_sel()
 
-        # --- 1. Selection Handling ---
         # Check if we have selection of text
         if not original:
             self.reset(ed_self)
             msg_status(_('Sync Editing: Make selection first'))
-            
-            # === PROFILING STOP: START_SYNC_EDIT (Exit Early) ===
-            if ENABLE_PROFILING_inside_start_sync_edit:
-                stop_profiling(pr_start, s_start, title='PROFILE: start_sync_edit (Entry Mode - Early Exit)')
-            # ====================================================
             return
 
-        # Use defaultdict (fastest for list appending workload)
-        session.dictionary = defaultdict(list)
-        session.line_index = defaultdict(list)
+        # --- 2. Lexer vs Naive mode decision ---
+        # Instantiate config to get fresh values from disk on every session
+        ini_config = PluginConfig()
+        
+        cur_lexer = ed_self.get_prop(PROP_LEXER_FILE)
+        
+        # Force naive way if lexer is none or lexer is one of the text file types
+        is_naive_lexer = not cur_lexer or cur_lexer in NAIVE_LEXERS
+        session.use_simple_naive_mode = is_naive_lexer or ini_config.get_lexer_bool(cur_lexer, 'use_simple_naive_mode', USE_SIMPLE_NAIVE_MODE_DEFAULT)
 
+        if not session.use_simple_naive_mode and allow_timer:
+            # when we call start_sync_edit() on a big file that uses a lexer we may get wrong results if the user just opened it recently, because Cudatext takes some time to parse and set tokens (Id, comments, strings..etc), this means that start_sync_edit will get wrong results because it will have few token or none, because cudatext did not return all tokens with get_token(TOKEN_LIST_SUB ...), so to fix this problem we need to subscribe to on_lexer_parsed event, but this event become enabled only if the token parsing takes more than 600ms, so we need to also use a timer that stops after 600ms and starts start_sync_edit after 600ms. this  make the script more robust and safe.
+            # so the plugin work like this: when user start a sync edit session, it cancel calling start_sync_edit here and start a timer of 600ms life and listen to on_lexer_parsed event and delete the created sync edit session, then when 600ms fires it calls start_sync_edit. this means also that if on_lexer_parsed fires later after 2s for example then it will call again start_sync_edit, so this means that the file may be checked twice, one because we clicked the gutter icon, and one if on_lexer_parsed fires later, we cannot prevent this double run unless the API removes the 600ms limit
+            
+            handle = ed_self.get_prop(PROP_HANDLE_SELF)
+
+            # Cancel any previous delay timer for this exact editor (important if user clicks twice quickly)
+            timer_proc(TIMER_STOP, self.lexer_timer, interval=0, tag=str(handle))
+            self.pending_delay_handles.discard(handle) # Remove old entry if existed
+
+            self.pending_delay_handles.add(handle)
+            timer_proc(TIMER_START_ONE, self.lexer_timer, interval=600, tag=str(handle))
+            
+            # Subscribe to on_lexer_parsed event for files that take longer than 600ms to parse
+            set_events_safely(['on_lexer_parsed'])
+            
+            self.reset(ed_self)
+            msg_status(_('Sync Editing: delay start for 600ms for safety'))
+            return
+
+        # --- 3. Start ---
+        # now we are sure that CudaText lexer parsing finished so we can start the work safely
+        
+        # === PROFILING START: START_SYNC_EDIT ===
+        if ENABLE_PROFILING_inside_start_sync_edit:
+            pr_start, s_start = start_profiling()
+        # ========================================
+
+        msg_status(_('Sync Editing: Analyzing...'))
+        t0 = time.perf_counter()
+        t_prev = t0
+
+        # --- 3.1. Selection Handling ---
+        
         # Save coordinates and "Lock" the selection
         session.start_l, session.end_l = ed_self.get_sel_lines()
         session.selected = True
@@ -432,23 +498,18 @@ class Command:
         # Break text selection and clear visual selection to show markers instead
         ed_self.set_sel_rect(0,0,0,0)
 
+        # now that we created a session we should always call update_gutter_icon_on_selection before start_sync_edit to set gutter_icon_line (set by show_gutter_icon) which will be used in start_sync_edit to set the active gutter icon
+        # Update gutter icon before starting to ensure session.gutter_icon_line is set. This allows us to flip it to "Active" mode shortly after.
+        self.update_gutter_icon_on_selection(ed_self)
         # Update gutter icon to show active state
         if session.gutter_icon_line is not None:
             self.show_gutter_icon(ed_self, session.gutter_icon_line, active=True)
 
         # Mark the range properties for CudaText
         ed_self.set_prop(PROP_MARKED_RANGE, (start_l, end_l))
+        
+        # --- 3.2. Load Configuration ---
 
-        # --- 2. Lexer / Parser Configuration ---
-        # Instantiate config to get fresh values from disk on every session
-        ini_config = PluginConfig()
-        
-        cur_lexer = ed_self.get_prop(PROP_LEXER_FILE)
-        
-        # Force naive way if lexer is none or lexer is one of the text file types
-        is_naive_lexer = not cur_lexer or cur_lexer in NAIVE_LEXERS
-        session.use_simple_naive_mode = is_naive_lexer or ini_config.get_lexer_bool(cur_lexer, 'use_simple_naive_mode', USE_SIMPLE_NAIVE_MODE_DEFAULT)
-        
         # Determine if we use specific lexer rules
         # If it is non-standard lexer, change its behavior otherwise use the default
         local_styles_default = NON_STANDARD_LEXERS.get(cur_lexer, IDENTIFIER_STYLE_INCLUDE_DEFAULT)
@@ -487,9 +548,12 @@ class Command:
             print(_('ERROR: Sync Editing: Invalid identifier_style_exclude config - using fallback'))
             exclude_re = re.compile(IDENTIFIER_STYLE_EXCLUDE_DEFAULT)
 
+        # --- 4. Build Dictionary ---
+
         # NOTE: Do not use app_idle (set_progress) before EDACTION_LEXER_SCAN.
         # App_idle runs message processing which can conflict with parsing actions.
-        # if SHOW_PROGRESS: self.set_progress(10) # do not use this here before ed.action(EDACTION_LEXER_SCAN. see bug: https://github.com/Alexey-T/CudaText/issues/6120 the bug happen only with this line. Alexey said: app_idle is the main reason, it is bad to insert it before some parsing action. Usually app_idle is needed after some action, to run the app message processing. Not before. Dont use it if not nessesary...
+        # so do not use set_progress here before ed.action(EDACTION_LEXER_SCAN. see bug: https://github.com/Alexey-T/CudaText/issues/6120 the bug happen only with this line. Alexey said: app_idle is the main reason, it is bad to insert it before some parsing action. Usually app_idle is needed after some action, to run the app message processing. Not before. Dont use it if not nessesary...
+        # if SHOW_PROGRESS: self.set_progress(10)
 
         # Run lexer scan from start. Force a Lexer scan to ensure tokens are up to date
         # EDACTION_LEXER_SCAN seems not needed anymore see:https://github.com/Alexey-T/CudaText/issues/6124
@@ -503,11 +567,12 @@ class Command:
 
         # Coordinate Correction
         x1, y1, x2, y2 = caret
-        # Sort coords of caret
         if (y1, x1) > (y2, x2):
-            x1, y1, x2, y2 = x2, y2, x1, y1
-        # FIX #15 regression: the problem come from get_sel_lines() it does not return the last empty line, but get_carets() include the last empty line. here we handle selection ending at the start of a new line.
-        # If x2 is 0 and we have multiple lines, it means the selection visually ends at the previous line's end. We adjust x2, y2 to point to the "end" of the previous line so filters don't drop tokens on that line.
+            x1, y1, x2, y2 = x2, y2, x1, y1 # Sort coords of caret
+            
+        # FIX #15 regression: when selection ends at the start of a new empty line, and we remove token outside of the selection (done bellow in "Drop tokens outside of selection") we lose the last line. the problem come from get_sel_lines() it does not return the last empty line, but get_carets() include the last empty line.
+        # here we handle selection ending at the start of a new line.
+        # If x2 is 0 and we have multiple lines, it means the selection visually ends at the previous line's end. We adjust x2, y2 to point to the "end" of the previous line so our filter later don't drop tokens on that line.
         if x2 == 0 and y2 > y1:
             y2 -= 1
             x2 = ed_self.get_line_len(y2)
@@ -515,7 +580,11 @@ class Command:
         # Pre-compute case sensitivity handler
         key_normalizer = (lambda s: s) if session.case_sensitive else (lambda s: s.lower())
 
-        # Step A: Build Dictionary AND Line Index
+        # --- 4. Step A: Build Dictionary AND Line Index ---
+        
+        # Use defaultdict (fastest for list appending workload)
+        session.dictionary = defaultdict(list)
+        session.line_index = defaultdict(list)
         if session.use_simple_naive_mode:
             # === NAIVE MODE (Regex Only) ===
             # Naive Mode: Scan text purely by Regex, ignoring syntax context. This is generally faster as it bypasses ed.get_token
@@ -525,17 +594,16 @@ class Command:
                 for match in session.regex_identifier.finditer(cur_line):
                     mstart, mend = match.span()
                     matchg = match.group()
-                    # Drop tokens out of selection
+                    # 1. Drop tokens outside of selection
                     if y == start_l and mstart < x1: continue
                     if y == end_l and mend > x2: continue
                     
                     key = key_normalizer(matchg)
                     token_ref = TokenRef(mstart, y, mend, y, matchg, 'id')
                     
-                    # Build dict and line_index
+                    # 2. Build dict and line_index
                     session.dictionary[key].append(token_ref)
                     session.line_index[y].append((token_ref, key))
-
         else:
             # === LEXER MODE (Syntax Aware) ===
             # Standard Lexer Mode: Filter tokens by Style (Variable, Function, etc.)
@@ -594,10 +662,10 @@ class Command:
             t_prev = t_now
         if SHOW_PROGRESS: self.set_progress(70)
         
-        # Step B: Remove Singletons (Clean garbage) - OPTIMIZED with in-place filtering
-        # OPTIMIZATION: Filter dictionary and line_index simultaneously to avoid rebuilding line_index
-        keys_to_remove = [k for k, v in session.dictionary.items() if len(v) < 2]
+        # --- 4 Step B: Remove Singletons (Clean garbage) ---
         
+        # Filter dictionary and line_index simultaneously to avoid rebuilding line_index
+        keys_to_remove = [k for k, v in session.dictionary.items() if len(v) < 2]
         for key in keys_to_remove:
             # Get tokens before deleting
             singleton_tokens = session.dictionary[key]
@@ -635,9 +703,9 @@ class Command:
             # ====================================================
             return
 
-        # --- 4. Generate Color Map (once for entire session) ---
+        # --- 5. Generate Color Map (once for entire session) ---
+        
         # Pre-generate all colors to maintain consistency of colors when switching between View and Edit mode, so words will have the same color always inside the same session, and this reduce overhead also
-        # OPTIMIZATION: Batch color generation using dictionary comprehension (faster than loop)
         if session.use_colors:
             session.word_colors = {
                 key: (((hash(key) & 0xFF0000) >> 16) % 127 + 128) |
@@ -654,7 +722,8 @@ class Command:
             t_prev = t_now
         if SHOW_PROGRESS: self.set_progress(95)
         
-        # --- 5. Apply Visual Markers (ONLY FOR VISIBLE VIEWPORT PORTION) ---
+        # --- 6. Apply Visual Markers (ONLY FOR VISIBLE VIEWPORT PORTION) ---
+        
         # Visualize all editable identifiers in the selection. Mark all words that we can modify with pretty light color
         self.mark_all_words(ed_self)
         
@@ -665,20 +734,10 @@ class Command:
         if SHOW_PROGRESS: self.set_progress(-1)
 
         # Calculate summary statistics for the status bar message
-        if session.dictionary:
-            # Total number of unique words found with duplicates (unique duplicates)
-            unique_duplicates_count = len(session.dictionary) 
-            
-            # Total number of word occurrences across all dictionary entries (total duplicates)
-            total_duplicates_count = sum(len(v) for v in session.dictionary.values())
-            
-            total_elapsed_time = time.perf_counter() - t0
-
-            msg_summary = _(f'Sync Editing: Click ID to edit or Icon/Esc to exit. IDs={unique_duplicates_count}, Dups={total_duplicates_count}  ({total_elapsed_time:.3f}s)')
-        else:
-            # Fallback message if dictionary is empty (though handled by early exits)
-            msg_summary = _('Sync Editing: No editable identifiers found in selection')
-
+        unique_duplicates_count = len(session.dictionary) 
+        total_duplicates_count = sum(len(v) for v in session.dictionary.values())
+        total_elapsed_time = time.perf_counter() - t0
+        msg_summary = _(f'Sync Editing: Click ID to edit or Icon/Esc to exit. IDs={unique_duplicates_count}, Dups={total_duplicates_count}  ({total_elapsed_time:.3f}s)')
         msg_status(msg_summary)
         
         # restore caret but w/o selection
@@ -1015,7 +1074,7 @@ class Command:
                     self.reset(ed_self)
                 else:
                     # Otherwise, start sync editing
-                    self.start_sync_edit(ed_self)
+                    self.start_sync_edit(ed_self, allow_timer=True)
                 return False  # Prevent default processing
 
     def on_caret(self, ed_self):
@@ -1431,6 +1490,7 @@ class Command:
 
     def config(self):
         """Opens the plugin configuration INI file."""
+        print("sessions",self.sessions) # TODO delete
         try:
             ini_config = PluginConfig()
             file_open(ini_config.file_path)
