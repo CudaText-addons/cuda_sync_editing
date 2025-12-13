@@ -1150,13 +1150,9 @@ class Command:
                 # This caret has moved with the user's arrow key presses and is at the correct position
                 final_x, final_y = carets[idx][0], carets[idx][1]
             else:
-                if session.original:
-                    # Fallback case1: Use the position of the original word where the user clicked the first time
-                    final_x, final_y = session.original[0], session.original[1]
-                else:
-                    # Fallback case2: Use first caret (should rarely/never happen)
-                    # Better to land somewhere reasonable than to crash with IndexError
-                    final_x, final_y = carets[0][0], carets[0][1]
+                # Fallback case2: Use first caret (should rarely/never happen)
+                # Better to land somewhere reasonable than to crash with IndexError
+                final_x, final_y = carets[0][0], carets[0][1]
             
             # Set single caret at the determined position
             # This removes all other carets and places one caret at (final_x, final_y)
@@ -1177,59 +1173,97 @@ class Command:
 
     def caret_in_current_token(self, ed_self):
         """
-        Helper: Checks if the primary caret is strictly inside
-        the boundaries of the word currently being edited.
-        Uses line index for faster lookup.
+        Helper: Checks if the primary caret is inside the word being edited.
+        Handles 'Drift': Compensates for token positions shifting on the line 
+        as previous instances grow/shrink during Sync Editing.
         """
         session = self.get_session(ed_self)
         if not session.our_key:
             return False
+
         carets = ed_self.get_carets()
         if not carets:
             return False
-        
-        # Get the caret position that corresponds to the originally clicked occurrence
+            
         idx = session.original_occurrence_index
-        if idx is not None and idx < len(carets):
-            x0, y0 = carets[idx][0], carets[idx][1]
-        else:
-            x0, y0, _, _ = carets[0]
+        tokens_list = session.dictionary.get(session.our_key)
         
-        # Get the current position of the originally clicked token from our dictionary
-        # This is the source of truth for where the token actually is after edits
-        if session.our_key not in session.dictionary:
+        # 1. Validation
+        if idx is None or not tokens_list or idx >= len(carets) or idx >= len(tokens_list):
             return False
+
+        # Get the specific Caret and TokenRef
+        x0, y0 = carets[idx][0], carets[idx][1]
+        token_ref = tokens_list[idx]
         
-        edited_tokens = session.dictionary[session.our_key]
-        if idx is None or idx >= len(edited_tokens):
+        # 2. Strict Line Check 
+        # (If caret wrapped to next line, y0 changed, but token_ref is old -> False)
+        if y0 != token_ref.start_y:
             return False
+            
+        # 3. Find the ACTUAL start of the word under the caret
+        # We cannot rely on token_ref.start_x because it is stale.
+        # We must scan backwards from the caret to find where this word currently begins.
+        line_text = ed_self.get_text_line(y0)
         
-        # Get the token that corresponds to the originally clicked occurrence
-        original_token = edited_tokens[idx]
+        # Helper logic similar to redraw(): Backtrack to find start of ID
+        # Start scanning from caret position
+        actual_start_x = x0
         
-        # The caret must be on the same line as the original token
-        if y0 != original_token.start_y:
+        # If we are at the end of the line or word, step back one char to catch the word
+        # (e.g. typing at the end: 'cccd|')
+        if actual_start_x > 0 and (actual_start_x >= len(line_text) or not session.regex_identifier.match(line_text[actual_start_x:])):
+            actual_start_x -= 1
+
+        # Move back as long as the regex matches the string starting at that position
+        # This aligns with how standard regex identifiers work (greedy match from left)
+        while actual_start_x >= 0:
+            # Check if a word starts here that extends to/past our caret roughly?
+            # Simpler approach: verify char by char if it's part of an ID.
+            # But since we use a regex config, we stick to the user's regex logic:
+            if not session.regex_identifier.match(line_text[actual_start_x:]):
+                break
+            actual_start_x -= 1
+        actual_start_x += 1 # We went one step too far back
+        
+        if actual_start_x < 0: actual_start_x = 0
+
+        # 4. Check if this is a valid word match
+        match = session.regex_identifier.match(line_text[actual_start_x:])
+        if not match:
             return False
+            
+        current_word = match.group(0)
+        current_word_len = len(current_word)
         
-        # Get current line text for regex checking
-        current_line = ed_self.get_text_line(y0)
+        # Verify caret is actually within this word bounds (or at immediate end)
+        if not (actual_start_x <= x0 <= actual_start_x + current_word_len):
+            return False
+
+        # 5. DRIFT CORRECTION (The fix for "cccd cccd cccddd")
+        # We need to ensure the word we found is actually the one we are tracking.
+        # But its position has shifted. 
+        # Drift = (Index of this token on this line) * (Change in length)
         
-        # First priority: Check the dynamically growing/shrinking word boundaries
-        # This is crucial for handling typing in the middle or at the end
-        if session.regex_identifier and original_token.start_x <= len(current_line):
-            match = session.regex_identifier.match(current_line[original_token.start_x:])
-            if match:
-                # The match tells us the current actual word at this position (after typing)
-                matched_end = original_token.start_x + len(match.group(0))
-                # Allow caret to be anywhere within or at the end of the dynamically matched word
-                if x0 >= original_token.start_x and x0 <= matched_end:
-                    return True
+        # Calculate Delta (How much did the word grow/shrink?)
+        # We compare current word on screen vs the original key we started editing
+        delta = current_word_len - len(session.our_key)
         
-        # Fallback: Check if caret is within the stored token boundaries
-        # This handles cases where regex might not match (e.g., word being deleted)
-        if x0 >= original_token.start_x and x0 <= original_token.end_x:
+        # Count how many instances of 'our_key' are strictly BEFORE this one on the same line.
+        # This tells us how many times 'delta' was applied before reaching us.
+        tokens_on_line_before = 0
+        for t in tokens_list:
+            if t.start_y == y0 and t.start_x < token_ref.start_x:
+                tokens_on_line_before += 1
+                
+        calculated_drift = tokens_on_line_before * delta
+        expected_start_x = token_ref.start_x + calculated_drift
+        
+        # 6. Final Identity Verification
+        # Does the word we found match the expected position of our tracked token?
+        if actual_start_x == expected_start_x:
             return True
-        
+            
         return False
 
     def reset(self, ed_self=None, cleanup_lexer_events=True):
@@ -1494,7 +1528,7 @@ class Command:
         Continuous Edit Logic:
         If the user moves the caret OUTSIDE the active word, we do NOT exit immediately.
         We check if the landing spot is another valid ID.
-        - If landing on valid ID: Do nothing (let on_click handle the switch seamlessy).
+        - If landing on valid ID: Do nothing (let on_click handle the switch seamlessly).
         - If landing elsewhere: We 'finish' the edit, return to Selection mode, and show colors.
         
         NOTE: This event is ONLY subscribed during active sync sessions (dynamically).
@@ -1523,12 +1557,30 @@ class Command:
             if not carets:
                 self.finish_editing(ed_self)
                 return
-                
-            caret = carets[0]
-            # clicked_x, clicked_y = caret[0], caret[1]
-            clicked_x, clicked_y = session.original[0], session.original[1]
-            print("caret[0], caret[1]",caret[0], caret[1])
-            print("session.original",session.original[0], session.original[1])
+
+            '''
+            Why NOT to use session.original:
+            session.original stores the coordinates of where the user first clicked to start editing. It is a static position from the past. The on_caret event fires when the user moves the cursor to a new position. so this position is now stale after the user moved with arrow keys. Using stale coordinates would check the wrong location for valid IDs
+            '''
+            # clicked_x, clicked_y = session.original[0], session.original[1]
+
+            '''
+            Why carets[0] is risky:
+            If the user edits a word that appears 10 times, and they are looking at the 5th occurrence (middle of screen).
+            carets[0] checks the 1st occurrence (top of file).
+            If the text surrounding the 1st occurrence is different from the 5th, carets[0] might land on empty space while the user's caret lands on a valid word (or vice versa).
+            This causes "ghost" behavior where the plugin thinks you didn't land on a word even though you clearly see your cursor on one.
+            '''
+            # clicked_x, clicked_y = carets[0][0], carets[0][1]
+
+            # Use the stored index to find the specific caret the user is tracking.
+            # Fallback to 0 if the index is somehow invalid (safety).
+            idx = session.original_occurrence_index
+            if idx is not None and idx < len(carets):
+                clicked_x, clicked_y = carets[idx][0], carets[idx][1]
+            else:
+                # Fallback to first caret if something went wrong
+                clicked_x, clicked_y = carets[0][0], carets[0][1]
 
             # Check if caret is on a valid ID
             # Use line index for fast lookup
@@ -1615,6 +1667,7 @@ class Command:
             # NOTE: self.redraw(ed_self) is called here to update word markers live during typing.
             # This recalculates borders and shifts other tokens on the line as the word grows/shrinks. This is a performance hit on simple caret moves (arrow keys) but necessary for live updates.
             self.redraw(ed_self)
+            print("on_caret redraw")
 
     def on_scroll(self, ed_self):
         """
