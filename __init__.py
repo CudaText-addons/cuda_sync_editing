@@ -1329,13 +1329,14 @@ class Command:
         if y0 != token_ref.start_y:
             return False
         
-        # 3. Special handling for empty/deleted words
-        # If token is empty (deleted), just check proximity
+        # 3. Special handling for empty/deleted words - PRECISE BOUNDARY CHECK
         if token_ref.text == '' or token_ref.start_x == token_ref.end_x:
-            # Word is empty - check if caret is near where it was
-            # Be more lenient with the range check
-            within_range = abs(x0 - token_ref.start_x) <= 20  # Fixed 20 chars buffer
-            return within_range
+            # Word is empty (deleted)
+            # Allow caret at exact position or immediately after (start_x + 1)
+            # Why +1? When deleting last char, caret can land at start OR start+1
+            if token_ref.start_x <= x0 <= token_ref.start_x + 1:
+                return True
+            return False
             
         # 4. Find the ACTUAL start of the word under the caret
         # We cannot rely on token_ref.start_x because it is stale.
@@ -1364,10 +1365,13 @@ class Command:
         # If we're at position 0, check if there's a match there
         if actual_start_x == 0:
             if not session.regex_identifier.match(line_text[0:]):
-                # No match at position 0 - check proximity instead
-                old_length = len(token_ref.text)
-                within_range = abs(x0 - token_ref.start_x) <= max(old_length + 10, 20)
-                return within_range
+                # No match at position 0 - PRECISE BOUNDARY CHECK for empty word case
+                token_length = len(token_ref.text)
+                if token_length == 0:
+                    # Empty word - allow caret at start or start+1
+                    if token_ref.start_x <= x0 <= token_ref.start_x + 1:
+                        return True
+                return False
         else:
             actual_start_x += 1
         
@@ -1377,12 +1381,19 @@ class Command:
         # 5. Check if this is a valid word match
         match = session.regex_identifier.match(line_text[actual_start_x:])
         
-        # SPECIAL CASE: If no match but caret is near the original token position, check proximity
+        # SPECIAL CASE: If no match but caret is near the original token position
         if not match:
-            # Use token.text length (the TRUE current length) not session.our_key
-            old_length = len(token_ref.text)
-            within_range = abs(x0 - token_ref.start_x) <= max(old_length + 10, 20)
-            return within_range
+            token_length = len(token_ref.text)
+            
+            # Case A: Word is empty (deleted)
+            if token_length == 0:
+                if token_ref.start_x <= x0 <= token_ref.start_x + 1:
+                    return True
+                return False
+            
+            # Case B: Word exists but caret moved outside
+            # Be strict - if regex didn't match, we're not inside
+            return False
             
         current_word = match.group(0)
         current_word_len = len(current_word)
