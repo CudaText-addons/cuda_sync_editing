@@ -419,9 +419,9 @@ class Command:
             # ====================================================
             return
 
-        # Use plain dict (slightly faster for write-heavy workload than defaultdict)
-        session.dictionary = {}
-        session.line_index = {}
+        # Use defaultdict (fastest for list appending workload)
+        session.dictionary = defaultdict(list)
+        session.line_index = defaultdict(list)
 
         # Save coordinates and "Lock" the selection
         session.start_l, session.end_l = ed_self.get_sel_lines()
@@ -515,8 +515,7 @@ class Command:
         # Pre-compute case sensitivity handler
         key_normalizer = (lambda s: s) if session.case_sensitive else (lambda s: s.lower())
 
-        # Step A: Build Dictionary AND Line Index simultaneously (single pass)
-        # OPTIMIZATION: Combine dictionary + line_index construction to avoid double iteration
+        # Step A: Build Dictionary AND Line Index
         if session.use_simple_naive_mode:
             # === NAIVE MODE (Regex Only) ===
             # Naive Mode: Scan text purely by Regex, ignoring syntax context. This is generally faster as it bypasses ed.get_token
@@ -533,16 +532,9 @@ class Command:
                     key = key_normalizer(matchg)
                     token_ref = TokenRef(mstart, y, mend, y, matchg, 'id')
                     
-                    # Build dict and line_index simultaneously
-                    if key in session.dictionary:
-                        session.dictionary[key].append(token_ref)
-                    else:
-                        session.dictionary[key] = [token_ref]
-                    
-                    if y in session.line_index:
-                        session.line_index[y].append((token_ref, key))
-                    else:
-                        session.line_index[y] = [(token_ref, key)]
+                    # Build dict and line_index
+                    session.dictionary[key].append(token_ref)
+                    session.line_index[y].append((token_ref, key))
 
         else:
             # === LEXER MODE (Syntax Aware) ===
@@ -589,20 +581,12 @@ class Command:
                     continue
                 
                 # C. Add to dictionary AND line index in one pass
-                idd = key_normalizer(token['str'])
+                key = key_normalizer(token['str'])
                 token_ref = TokenRef(token['x1'], token['y1'], token['x2'], token['y2'], token['str'], token['style'])
                 
-                # Build dict and line_index simultaneously
-                if idd in session.dictionary:
-                    session.dictionary[idd].append(token_ref)
-                else:
-                    session.dictionary[idd] = [token_ref]
-                
-                y = token['y1']
-                if y in session.line_index:
-                    session.line_index[y].append((token_ref, idd))
-                else:
-                    session.line_index[y] = [(token_ref, idd)]
+                # Build dict and line_index.
+                session.dictionary[key].append(token_ref)
+                session.line_index[token['y1']].append((token_ref, key))
         
         if ENABLE_BENCH_TIMER: 
             t_now = time.perf_counter()
@@ -734,7 +718,7 @@ class Command:
         
         for key in session.dictionary:
             # Get pre-generated color for this word
-            color = session.word_colors.get(key, 0xFFFFFF)
+            color = session.word_colors.get(key, 0x00FFFF) # when user edit a word it becomes a new word so it have no cached color in word_colors, so it will use 0x00FFFF:yellow, i found this better than generating a new color because it allows to easly identify which words were changed
             
             for token_ref in session.dictionary[key]:
                 # OPTIMIZATION: Only add markers for the visible lines of the VIEWPORT
