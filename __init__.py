@@ -1301,8 +1301,6 @@ class Command:
     def caret_in_current_token(self, ed_self):
         """
         Helper: Checks if the primary caret is inside the word being edited.
-        Handles 'Drift': Compensates for token positions shifting on the line 
-        as previous instances grow/shrink during Sync Editing.
         """
         session = self.get_session(ed_self)
         if not session.our_key:
@@ -1328,17 +1326,8 @@ class Command:
         # this should never happen now thanks to _validate_carets_integrity
         if y0 != token_ref.start_y:
             return False
-        
-        # 3. Special handling for empty/deleted words - PRECISE BOUNDARY CHECK
-        if token_ref.text == '' or token_ref.start_x == token_ref.end_x:
-            # Word is empty (deleted)
-            # Allow caret at exact position or immediately after (start_x + 1)
-            # Why +1? When deleting last char, caret can land at start OR start+1
-            if token_ref.start_x <= x0 <= token_ref.start_x + 1:
-                return True
-            return False
             
-        # 4. Find the ACTUAL start of the word under the caret
+        # 3. Find the ACTUAL start of the word under the caret
         # We cannot rely on token_ref.start_x because it is stale.
         # We must scan backwards from the caret to find where this word currently begins.
         line_text = ed_self.get_text_line(y0)
@@ -1347,70 +1336,78 @@ class Command:
         # Start scanning from caret position
         actual_start_x = x0
         
-        # Safety: Don't go below 0. If we are at the end of the line or word, step back one char to catch the word
+        # If we are at the end of the line or word, step back one char to catch the word, otherwise when caret is at the end of the ID it will exit edit mode
         if actual_start_x > 0 and (actual_start_x >= len(line_text) or not session.regex_identifier.match(line_text[actual_start_x:])):
             actual_start_x -= 1
 
-        # Move back, but never below 0. as long as the regex matches the string starting at that position
-        # This aligns with how standard regex identifiers work (greedy match from left)
-        # Move back, but never below 0
-        while actual_start_x > 0:
-            # Check if a word starts here that extends to/past our caret roughly?
-            # Simpler approach: verify char by char if it's part of an ID.
-            # But since we use a regex config, we stick to the user's regex logic:
-            if not session.regex_identifier.match(line_text[actual_start_x:]):
-                break
-            actual_start_x -= 1
-        
-        # If we're at position 0, check if there's a match there
-        if actual_start_x == 0:
-            if not session.regex_identifier.match(line_text[0:]):
-                # No match at position 0 - PRECISE BOUNDARY CHECK for empty word case
-                token_length = len(token_ref.text)
-                if token_length == 0:
-                    # Empty word - allow caret at start or start+1
-                    if token_ref.start_x <= x0 <= token_ref.start_x + 1:
-                        return True
-                return False
-        else:
-            actual_start_x += 1
-        
-        if actual_start_x < 0:
-            actual_start_x = 0
+        '''
+        the two checks are necesary to fix a special case:
+        position 0 is a boundary condition that needs special handling because we cannot go below it.
+        in the following example, the user edit the second ccc and delete it. we get wrong actual_start_x depending of the case, there is two cases:
+        - case1: ccc start at x=0 (no space or invalid words before ccc)
+        aaa ccc
+        ccc aaa
 
-        # 5. Check if this is a valid word match
-        match = session.regex_identifier.match(line_text[actual_start_x:])
+        - case2: space before ccc
+          aaa ccc
+          ccc aaa
+        when i use only the first check inside x0 == 0 it work fine with the case1 but it breaks the case2, and if i use the second check inside x0 != 0 it works fine with case2 but breaks case1
+        now with both checks when i click on the second ccc and i delete it , it works correctly in both cases
+        '''
+        if x0 == 0:
+            # Move back as long as the regex matches the string starting at that position
+            # This aligns with how standard regex identifiers work (greedy match from left)
+            # Move back, but never below 0
+            while actual_start_x > 0:
+                # Check if a word starts here that extends to/past our caret roughly?
+                # Simpler approach: verify char by char if it's part of an ID.
+                # But since we use a regex config, we stick to the user's regex logic:
+                if not session.regex_identifier.match(line_text[actual_start_x:]):
+                    break
+                actual_start_x -= 1
+        else: # x0 != 0
+            while actual_start_x >= 0:
+                if not session.regex_identifier.match(line_text[actual_start_x:]):
+                    break
+                actual_start_x -= 1
+            actual_start_x += 1 # We went one step too far back
+            
+        if actual_start_x < 0: actual_start_x = 0
+
+        # 4. Check if this is a valid word match
+        print("actual_start_x",actual_start_x)
         
-        # SPECIAL CASE: If no match but caret is near the original token position
+        match = session.regex_identifier.match(line_text[actual_start_x:])
         if not match:
-            token_length = len(token_ref.text)
+            # no match, the user deleted the word or caret is on an invalid word (space..etc)
+            print("no match")
             
-            # Case A: Word is empty (deleted)
-            if token_length == 0:
-                if token_ref.start_x <= x0 <= token_ref.start_x + 1:
-                    return True
-                return False
-            
-            # Case B: Word exists but caret moved outside
-            # Be strict - if regex didn't match, we're not inside
+            # Allow empty identifiers: keep editing active if caret is still anchored at the expected token start.
+            # if the caret is at the start of the token and the caret is exactly between the start and end of the old word then the user probably deleted the word, because if the regex did not match then between start_x and end_x there is no valid word (in the past there was a word otherwise the old word would not have been saved to the dictionary in redraw()), so if there was a word between the start and end, and now there is no word between them, then this is probably a complete word delete
+            if token_ref.start_x <= x0 <= token_ref.end_x and x0 == token_ref.start_x:
+                # word was deleted
+                print("word deleted")
+                return True
+            print("not valid word")
+            # caret is on an invalid word (space...etc), probably the user only moved the caret outside the identifier/word or he wrote an invalid word/letter like space
             return False
-            
+        
+        # WORD FOUND - check if it matches our token with drift
         current_word = match.group(0)
         current_word_len = len(current_word)
-        
         # Verify caret is actually within this word bounds (or at immediate end)
         if not (actual_start_x <= x0 <= actual_start_x + current_word_len):
             return False
 
-        # 6. DRIFT CORRECTION (The fix for "cccd cccd cccddd")
+        # 5. DRIFT CORRECTION (The fix for "cccd cccd cccddd")
         # We need to ensure the word we found is actually the one we are tracking.
         # But its position has shifted. 
         # Drift = (Index of this token on this line) * (Change in length)
         
         # Calculate Delta (How much did the word grow/shrink?)
         # We compare current word on screen vs the original key we started editing
-        # Use token.text (the TRUE current state) for drift calculation
-        delta = current_word_len - len(token_ref.text)
+        old_length = len(token_ref.text)
+        delta = current_word_len - old_length
         
         # Count how many instances of 'our_key' are strictly BEFORE this one on the same line.
         # This tells us how many times 'delta' was applied before reaching us.
@@ -1422,7 +1419,7 @@ class Command:
         calculated_drift = tokens_on_line_before * delta
         expected_start_x = token_ref.start_x + calculated_drift
         
-        # 7. Final Identity Verification
+        # 6. Final Identity Verification
         # Does the word we found match the expected position of our tracked token?
         if actual_start_x == expected_start_x:
             return True
