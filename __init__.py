@@ -1023,11 +1023,25 @@ class Command:
         # Remove the "Active Editing" markers (borders)
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
 
-        # Reset carets to single caret (keep first caret position)
+        # Reset carets to single caret at the ORIGINAL position (where user first clicked)
+        # Find the caret that corresponds to the line where the user started editing,
+        # otherwise it defaults to carets[0] and jumps to the top of the file.
+        # """
         carets = ed_self.get_carets()
         if carets:
-            first_caret = carets[0]
-            ed_self.set_caret(first_caret[0], first_caret[1], id=CARET_SET_ONE)
+            final_x, final_y = carets[0][0], carets[0][1] # Default to first caret            
+            if session.original:
+                orig_y = session.original[1]
+                # Find the caret that is on the same line as the original click
+                for (cx, cy, _, _) in carets:
+                    if cy == orig_y:
+                        final_x, final_y = cx, cy
+                        break
+            
+            ed_self.set_caret(final_x, final_y, id=CARET_SET_ONE)
+        # """
+        # if session.original:
+            # ed_self.set_caret(session.original[0], session.original[1], id=CARET_SET_ONE)
 
         # Reset flags to 'View/Selection' mode
         session.selected = True
