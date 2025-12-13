@@ -141,7 +141,7 @@ def set_events_safely(events_to_add, lexer_list=''):
     
     API >= 1.0.471:
       - Uses PROC_EVENTS_SUB/UNSUB.
-      - Manages only dynamic events (on_lexer_parsed, on_scroll, on_caret).
+      - Manages only dynamic events (on_lexer_parsed, on_scroll, on_caret, on_click, on_key, on_open_reopen).
       - Static events in install.inf are preserved automatically by CudaText.
       
     API < 1.0.471:
@@ -158,7 +158,7 @@ def set_events_safely(events_to_add, lexer_list=''):
         # --- NEW API LOGIC ---
         
         # 1. Define dynamic events managed by this plugin
-        DYNAMIC_EVENTS = {'on_lexer_parsed', 'on_scroll', 'on_caret'}
+        DYNAMIC_EVENTS = {'on_lexer_parsed', 'on_scroll', 'on_caret', 'on_click', 'on_key', 'on_open_reopen'}
         
         # 2. Unsubscribe from dynamic events that are NOT in the needed list
         # We must explicitly unsub to turn them off, otherwise they stick around.
@@ -176,7 +176,7 @@ def set_events_safely(events_to_add, lexer_list=''):
             app_proc(PROC_EVENTS_SUB, f'cuda_sync_editing;{events_str};{lexer_list};;')
             
     else:
-        # --- LEGACY API LOGIC ---
+        # --- LEGACY API LOGIC (Old CudaText) ---
         
         # in the old API we have to set events while preserving those from install.inf. because PROC_SET_EVENTS resets all the events including those from install.inf (only events in plugins.ini are preserved).
         # and also we should not use on_caret_slow keys filters like sel and selreset, the old API was buged, so when we parse install.inf we must remove them when we subscribe dynamically to on_caret_slow. this will not break this plugin because on_caret_slow events are suficient to detect text selections without using sel/selreset.
@@ -184,11 +184,11 @@ def set_events_safely(events_to_add, lexer_list=''):
         # Combine install.inf events with new events
         all_events = {}
         
-        # Add install.inf events but FORCE empty filters (ignore keys like 'sel,selreset')
+        # Add install.inf events (on_caret_slow, on_close, on_click_gutter) but FORCE empty filters (ignore keys like 'sel,selreset')
         for ev in install_inf_events:
             all_events[ev] = '' 
         
-        # Add new events (without filters)
+        # Add new dynamic events (on_key, on_click, etc.), without filters
         for event in events_to_add:
             if event not in all_events:
                 all_events[event] = ''
@@ -374,33 +374,42 @@ class Command:
 
     def _update_event_subscriptions(self):
         """
-        central event subscription management method
+        Central event subscription management method
         Central method to manage all dynamic event subscriptions.
-        Coordinates on_lexer_parsed, on_scroll, and on_caret based on current plugin state.
+        Coordinates on_lexer_parsed, on_scroll, on_caret, on_click, on_key, and on_open_reopen based on current plugin state.
         
         This ensures:
         - on_lexer_parsed is active when editors are waiting for lexer parsing
         - on_scroll is active when editors have active sync sessions OR have selections
         - on_caret is active when editors have active sync sessions
+        - on_click is active when editors have active sync sessions
+        - on_key is active when editors have active sync sessions
+        - on_open_reopen is active when editors have active sync sessions
         - Events are properly combined and don't conflict
         
         this necesary for now, once PROC_GET_EVENTS https://github.com/Alexey-T/CudaText/issues/6138 is implemented this can be simplified 
         """
         events_needed = []
         
+        # 1. Parsing Events
         # Add on_lexer_parsed if any editor is waiting for lexer parsing
         if self.pending_lexer_parse_handles:
             events_needed.append('on_lexer_parsed')
         
+        # 2. Scroll Events (Active Session OR Selection with Gutter Icon)
         # Add on_scroll if any editor has an active sync session OR has a selection
         if self.active_scroll_handles or self.selection_scroll_handles:
             events_needed.append('on_scroll')
         
-        # Add on_caret if any editor has an active sync session
+        # 3. Active Session Events (Editing/Interaction)
+        # Add on_caret, on_click, on_key, on_open_reopen if any editor has an active sync session
         if self.active_caret_handles:
-            events_needed.append('on_caret')
+            events_needed.append('on_caret')        # For caret tracking
+            events_needed.append('on_click')        # For clicking words
+            events_needed.append('on_key')          # For Esc/Arrow keys
+            events_needed.append('on_open_reopen')  # For file reload safety
             
-        # Update subscriptions (preserves install.inf events)
+        # Update subscriptions
         set_events_safely(events_needed)
 
     def get_editor_handle(self, ed_self):
@@ -994,10 +1003,9 @@ class Command:
         msg_summary = _(f'Sync Editing: Click ID to edit or Icon/Esc to exit. IDs={unique_duplicates_count}, Dups={total_duplicates_count}  ({total_elapsed_time:.3f}s)')
         msg_status(msg_summary)
         
-        # Subscribe to on_scroll event for this editor
+        # Subscribe to on_scroll, on_caret, on_click, on_key, on_open_reopen events for this editor
         handle = self.get_editor_handle(ed_self)
         self.active_scroll_handles.add(handle)
-        # Subscribe to on_caret event for live editing updates
         self.active_caret_handles.add(handle)
         self._update_event_subscriptions()
         
@@ -1342,14 +1350,14 @@ class Command:
         Args:
             - ed_self: Editor instance
             - cleanup_lexer_events: If True, clean up lexer event subscriptions. If False, keep lexer events active (used during lexer parsing delay where we need events to persist).
-            NOTE: Scroll and caret events are ALWAYS cleaned up regardless.
+            NOTE: on_scroll, on_caret, on_click, on_key and on_open_reopen events are ALWAYS cleaned up regardless.
         """
         if ed_self is None:
             ed_self = ed
         session = self.get_session(ed_self)
         handle = self.get_editor_handle(ed_self)
         
-        # ALWAYS clean up scroll and caret tracking (session is ending)
+        # ALWAYS clean up on_scroll, on_caret, on_click, on_key and on_open_reopen tracking (session is ending)
         self.active_scroll_handles.discard(handle)
         self.active_caret_handles.discard(handle)
         
@@ -1369,7 +1377,7 @@ class Command:
             # self.lexer_parsed_message_shown.discard(handle)
 
         # Update event subscriptions
-        # here we unsubscribe from on_lexer_parsed if no more editors are waiting, on_scroll if no other editor need it, and on_caret if no other editor needs it
+        # here we unsubscribe from on_lexer_parsed if no more editors are waiting, on_scroll if no other editor need it, on_caret if no other editor needs it, and on_click/on_key/on_open_reopen if no active sessions
         self._update_event_subscriptions()
     
         # Restore original position if needed
@@ -1841,15 +1849,14 @@ class Command:
         if not self.has_session(ed_self):
             return
 
-        session = self.get_session(ed_self)
-        
-        # Only check problematic keys during editing mode
-        if not session.editing:
-            return
-        
         if key == VK_ESCAPE:
             self.reset(ed_self)
             return False
+            
+        session = self.get_session(ed_self)
+        # Only check problematic keys during editing mode
+        if not session.editing:
+            return
 
         # sometimes when i move the carets with the keyboard up and down key some carets are removed when they found no place where to land (start of file or end of file or an empty line with no place where to put multiple carets ), this problem breaks a lot of things in the plugin, for example original_occurrence_index will point to the wrong index because the total number of carets changed so for example if there was 10 carets, after the caret movement they become 5 carets, so ed_self.get_carets() will return 5 carets, but original_occurrence_index is still pointing to the one of the old 10 carets. to fix this we have to disable up and down keys
         # enter key is also problematic and would create multi-line editing chaos, so we have to disable it too
