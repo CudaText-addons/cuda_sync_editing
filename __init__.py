@@ -1328,8 +1328,16 @@ class Command:
         # this should never happen now thanks to _validate_carets_integrity
         if y0 != token_ref.start_y:
             return False
+        
+        # 3. Special handling for empty/deleted words
+        # If token is empty (deleted), just check proximity
+        if token_ref.text == '' or token_ref.start_x == token_ref.end_x:
+            # Word is empty - check if caret is near where it was
+            # Be more lenient with the range check
+            within_range = abs(x0 - token_ref.start_x) <= 20  # Fixed 20 chars buffer
+            return within_range
             
-        # 3. Find the ACTUAL start of the word under the caret
+        # 4. Find the ACTUAL start of the word under the caret
         # We cannot rely on token_ref.start_x because it is stale.
         # We must scan backwards from the caret to find where this word currently begins.
         line_text = ed_self.get_text_line(y0)
@@ -1338,27 +1346,38 @@ class Command:
         # Start scanning from caret position
         actual_start_x = x0
         
-        # If we are at the end of the line or word, step back one char to catch the word
+        # Safety: Don't go below 0. If we are at the end of the line or word, step back one char to catch the word
         if actual_start_x > 0 and (actual_start_x >= len(line_text) or not session.regex_identifier.match(line_text[actual_start_x:])):
             actual_start_x -= 1
 
-        # Move back as long as the regex matches the string starting at that position
+        # Move back, but never below 0. as long as the regex matches the string starting at that position
         # This aligns with how standard regex identifiers work (greedy match from left)
-        while actual_start_x >= 0:
+        # Move back, but never below 0
+        while actual_start_x > 0:
             # Check if a word starts here that extends to/past our caret roughly?
             # Simpler approach: verify char by char if it's part of an ID.
             # But since we use a regex config, we stick to the user's regex logic:
             if not session.regex_identifier.match(line_text[actual_start_x:]):
                 break
             actual_start_x -= 1
-        actual_start_x += 1 # We went one step too far back
         
-        if actual_start_x < 0: actual_start_x = 0
+        # If we're at position 0, check if there's a match there
+        if actual_start_x == 0:
+            if not session.regex_identifier.match(line_text[0:]):
+                # No match at position 0 - check proximity instead
+                old_length = len(token_ref.text)
+                within_range = abs(x0 - token_ref.start_x) <= max(old_length + 10, 20)
+                return within_range
+        else:
+            actual_start_x += 1
+        
+        if actual_start_x < 0:
+            actual_start_x = 0
 
-        # 4. Check if this is a valid word match
+        # 5. Check if this is a valid word match
         match = session.regex_identifier.match(line_text[actual_start_x:])
         
-        # SPECIAL CASE: If no match but caret is near the original token position
+        # SPECIAL CASE: If no match but caret is near the original token position, check proximity
         if not match:
             # Use token.text length (the TRUE current length) not session.our_key
             old_length = len(token_ref.text)
@@ -1372,7 +1391,7 @@ class Command:
         if not (actual_start_x <= x0 <= actual_start_x + current_word_len):
             return False
 
-        # 5. DRIFT CORRECTION (The fix for "cccd cccd cccddd")
+        # 6. DRIFT CORRECTION (The fix for "cccd cccd cccddd")
         # We need to ensure the word we found is actually the one we are tracking.
         # But its position has shifted. 
         # Drift = (Index of this token on this line) * (Change in length)
@@ -1392,7 +1411,7 @@ class Command:
         calculated_drift = tokens_on_line_before * delta
         expected_start_x = token_ref.start_x + calculated_drift
         
-        # 6. Final Identity Verification
+        # 7. Final Identity Verification
         # Does the word we found match the expected position of our tracked token?
         if actual_start_x == expected_start_x:
             return True
@@ -1987,17 +2006,38 @@ class Command:
         first_y_line = ed_self.get_text_line(first_y)
         
         # Find start of the word under caret
+        # Clamp caret position first
+        if first_x < 0:
+            first_x = 0
+        if first_x > len(first_y_line):
+            first_x = len(first_y_line)
+        
         start_pos = first_x
 
         # Backtrack from caret to find start of the new word
         # Workaround for end of id case: If caret is at the very end, move back 1 to capture the match
-        if not session.regex_identifier.match(first_y_line[start_pos:]):
-            start_pos -= 1
+        # Safety check: only move back if we're not at position 0
+        if start_pos > 0:
+            if start_pos >= len(first_y_line) or not session.regex_identifier.match(first_y_line[start_pos:]):
+                start_pos -= 1
 
         # Move start_pos back until we find the beginning of the identifier
-        while start_pos >= 0 and session.regex_identifier.match(first_y_line[start_pos:]):
+        # Move back as long as the regex matches, but never below 0
+        while start_pos > 0 and session.regex_identifier.match(first_y_line[start_pos:]):
             start_pos -= 1
-        start_pos += 1
+        
+        # Only increment if we actually moved back AND we're not at a match position
+        # Check if we're at position 0 and there's a match
+        if start_pos == 0:
+            if not session.regex_identifier.match(first_y_line[0:]):
+                # No match at 0, word might be deleted
+                pass
+            # If there IS a match at 0, start_pos stays at 0
+        else:
+            # We moved back, so increment to get to start of word
+            start_pos += 1
+        
+        # Final safety clamp
         # Workaround for EOL #65. Safety for EOL/BOL cases
         if start_pos < 0:
             start_pos = 0
@@ -2061,9 +2101,23 @@ class Command:
                 # Scan backwards to find start of the new word instance from the adjusted position
                 # here we search for the token starting from its old position
                 search_x = old_token_x
-                while search_x >= 0 and session.regex_identifier.match(y_line[search_x:]):
+                
+                # Only backtrack if we're not at position 0. Search backward from old position, but never below 0
+                while search_x > 0 and session.regex_identifier.match(y_line[search_x:]):
                     search_x -= 1
-                search_x += 1
+                
+                # Increment only if we moved back
+                # Check if we're at position 0 with a match
+                if search_x == 0:
+                    if not session.regex_identifier.match(y_line[0:]):
+                        # No match at 0, keep old position (shouldn't happen)
+                        search_x = old_token_x
+                    # Else: match at 0, search_x stays 0
+                else:
+                    # We moved back, increment to start of word
+                    search_x += 1
+                
+                # Safety clamp
                 # Workaround for EOL #65
                 if search_x < 0:
                     search_x = 0
@@ -2075,14 +2129,16 @@ class Command:
             
             # Shift other tokens on this line that come AFTER this token
             # Only process tokens on the same line (using spatial index)
+            # CRITICAL: Use >= old_token_x + old_length to handle x=0 case (user delete a word at position x=0)
             if delta != 0 and line_num in session.line_index:
                 for other_ref, other_key in session.line_index[line_num]:
                     # Skip the token we just updated
                     if other_ref is token_ref:
                         continue
-                    
+                    # Only shift tokens that come AFTER the end of the old word
                     # If other token comes after this one, shift it
-                    if other_ref.start_x > old_token_x:
+                    # Use >= instead of > to handle x=0 case correctly
+                    if other_ref.start_x >= old_token_x + old_length:
                         other_ref.shift(delta)
 
         '''
