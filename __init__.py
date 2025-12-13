@@ -81,21 +81,70 @@ SHOW_PROGRESS=True
 _mydir = os.path.dirname(__file__)
 filename_install_inf = os.path.join(_mydir, 'install.inf')
 
-_events_str = ini_read(filename_install_inf, 'item1', 'events', '')
-install_inf_events = {ev.strip() for ev in _events_str.split(',') if ev.strip()}
+def parse_install_inf_events():
+    """
+    Parse all event sections from install.inf.
+    Returns a dict with event names as keys and their filter strings as values.
+    Example: {'on_caret_slow': 'sel', 'on_click~': '', 'on_key~': ''}
+    """
+    events_dict = {}
+    
+    # Find all sections that start with 'item'
+    item_num = 1
+    while True:
+        section = f'item{item_num}'
+        section_type = ini_read(filename_install_inf, section, 'section', '')
+        
+        if not section_type:
+            break  # No more sections
+        
+        if section_type == 'events':
+            events_str = ini_read(filename_install_inf, section, 'events', '')
+            keys_str = ini_read(filename_install_inf, section, 'keys', '')
+            
+            # Split events by comma and add to dict
+            for event in events_str.split(','):
+                event = event.strip()
+                if event:
+                    events_dict[event] = keys_str
+        
+        item_num += 1
+    
+    return events_dict
 
-def set_events_safely(events_to_add, lexer_list='', filter_str=''):
+# Parse install.inf events and keys
+install_inf_events = parse_install_inf_events()
+
+def set_events_safely(events_to_add, lexer_list=''):
     """
     Set events while preserving those from install.inf. because PROC_SET_EVENTS resets all the events including those from install.inf (only events in plugins.ini are preserved).
     
     Args:
-        events_to_add: Set or list of event names to add
+        events_to_add: Set or list of event names to add (without filter strings)
         lexer_list: Comma-separated lexer names (optional)
-        filter_str: Filter parameter for certain events (optional)
     """
-    all_events = install_inf_events | set(events_to_add)
-    event_list_str = ','.join(all_events)
-    app_proc(PROC_SET_EVENTS, f"cuda_sync_editing;{event_list_str};{lexer_list};{filter_str}")
+    # Combine install.inf events with new events
+    all_events = {}
+    
+    # Add install.inf events with their filters
+    all_events.update(install_inf_events)
+    
+    # Add new events (without filters, will use empty string)
+    for event in events_to_add:
+        if event not in all_events:
+            all_events[event] = ''
+    
+    # Build event string with filters
+    # Format: "plugin_name;event1,event2;lexer_list;filter1,filter2"
+    # Only include filter strings for events that have non-empty filters
+    event_names = ','.join(all_events.keys())
+    
+    # Build filter string - only include non-empty filters
+    filter_list = [f for f in all_events.values() if f]
+    filter_strings = ','.join(filter_list) if filter_list else ''
+    
+    # print('PROC_SET_EVENTS', f"cuda_sync_editing;{event_names};{lexer_list};{filter_strings}")
+    app_proc(PROC_SET_EVENTS, f"cuda_sync_editing;{event_names};{lexer_list};{filter_strings}")
 
 def bool_to_ini(value):
     return 'true' if value else 'false'
