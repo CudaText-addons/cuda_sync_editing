@@ -399,7 +399,7 @@ class Command:
 
     def on_open_reopen(self, ed_self):
         """
-        Called when the file is reloaded/reopened from disk (File → Reload).
+        Called when the file is reloaded/reopened from disk (File => Reload).
         The entire document content is replaced, so all marker positions become invalid.
         We must fully exit sync editing to avoid crashes or visual glitches.
         """
@@ -529,8 +529,8 @@ class Command:
         IMPORTANT: This event fires ONCE per editor when that specific editor's lexer completes.
         The ed_self parameter tells us WHICH editor triggered the event.
         So if Editor A and Editor B are both waiting:
-          - When Editor A finishes → on_lexer_parsed(ed_self=Editor_A) fires
-          - When Editor B finishes → on_lexer_parsed(ed_self=Editor_B) fires
+          - When Editor A finishes => on_lexer_parsed(ed_self=Editor_A) fires
+          - When Editor B finishes => on_lexer_parsed(ed_self=Editor_B) fires
         Each call processes only the editor that triggered it (via ed_self).
         """
         handle = self.get_editor_handle(ed_self)
@@ -1147,6 +1147,7 @@ class Command:
             # 2. Some other plugin interfered with carets
             # 3. Unexpected CudaText behavior or bug
             # 4. The word was edited to become invalid (e.g., deleted completely) and some carets disappeared
+            # 5. Carets were removed by CudaText when we use up/down key, but this should never happen now because we block this keys in on_key
             # 
             # In such cases, we fall back to carets[0] as a safe default rather than crashing.
             # This ensures the plugin remains stable even in unexpected scenarios.
@@ -1208,6 +1209,7 @@ class Command:
         
         # 2. Strict Line Check 
         # (If caret wrapped to next line, y0 changed, but token_ref is old -> False)
+        # this should never happen now thanks to _validate_carets_integrity
         if y0 != token_ref.start_y:
             return False
             
@@ -1342,15 +1344,17 @@ class Command:
 
     def on_click(self, ed_self, _state):
         """
-        Handles mouse clicks to toggle between 'Viewing' and 'Editing'.
+        Handles mouse clicks to toggle between 'Viewing/Selection' and 'Editing' Modes.
         Logic:
-        1. If Editing -> Finish current edit (Loop back to Selection).
-        2. If Selection -> Check if click is on valid ID.
+        1. If Editing -> Check if click is on valid ID.
+           - Yes: Do nothing (Do not exit). Switch from ID to ID
+           - No: Finish current edit (Loop back to Viewing).
+        2. If Viewing -> Check if click is on valid ID.
            - Yes: Start Editing (Add carets to ALL duplicates, and add color and borders to VISIBLE VIEWPORT PORTION only).
            - No: Do nothing (Do not exit).
         Uses spatial index for faster word lookups.
         """
-        # OPTIMIZATION: exit early if sync edit mode is not active
+        # exit early if sync edit mode is not active
         if not self.has_session(ed_self):
             return
 
@@ -1391,38 +1395,41 @@ class Command:
             # click was NOT on a valid ID
             
             if session.editing:
-                # User clicked outside while he was in editing mode → finish editing mode and show colors (return to selection/view mode)
-                # this will never happen (we will never reach this code) because we already called finish_editing inside on_caret which sets session.editing = False, because on_caret event always come before on_click events in cudatext, but if cudatext change this in the future (on_click event come before on_caret event) then we are safe
+                # User clicked outside while he was in editing mode => finish editing mode and show colors (return to selection/view mode)
                 self.finish_editing(ed_self)
-            # else: 
+            else: 
                 # User clicked outside while he was in View/Selection mode
-                # msg_status(_('Sync Editing: Not a word! Click on ID to edit it.'))
+                msg_status(_("Sync Editing: Not an ID! Click on ID to edit it. Writing outside ID's is not supported"))
             return
 
-        # At this point we have a valid ID clicked_key → we are either:
+        # At this point we know that we have clicked a valid ID (clicked_key) => we are either:
         #   1. Starting editing from selection mode, or
-        #   2. Switching directly from one ID to another ID (seamless, no colors flash)
+        #   2. Switching directly from one ID to another ID
 
-        # Seamless switch preparation: only clear markers + reset carets, NO mark_all_words()
+        # ID to ID switch preparation: only clear markers + reset carets, NO colorization with mark_all_words()
         if session.editing:
+            # we clicked a valid ID, it may be a new one or the same edited one
             ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
             # Reset to single caret at the clicked position (keeps caret where user clicked)
             ed_self.set_caret(clicked_x, clicked_y, id=CARET_SET_ONE)
+            
+            # === PROFILING ===
             if is_switch:
                 if ENABLE_BENCH_TIMER:
                     print(f">>> Switch phase 1 (finish old): {time.perf_counter() - switch_start:.4f}s")
+            # =================
         else:
-            # we cliked a valid ID and we were in View/Selection mode, so First time entering Editing mode → clear colored backgrounds
+            # we cliked a valid ID and we were in View/Selection mode, so First time entering Editing mode => clear colored backgrounds
             ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
 
-        # --- Start Editing Mode (new word) ---
+        # --- Start Editing Mode ---
 
         # Get visible line range
         line_top, line_bottom = self.get_visible_line_range(ed_self)
 
         # Collect all markers to add, sorted by (y, x)
         # Collect markers only for visible lines
-        # we collect ALL instances for caret placement, but markers only for visible lines
+        # we collect ALL instances for caret placement, but we colorize only the visible lines
         all_carets = []
         markers_to_add = []
         
@@ -1549,9 +1556,11 @@ class Command:
         
         Here we handle only carets events from keyboard movements left/right. up/down are blocked in on_key. carets events made by mouse clicks are handeled in on_click.
         Here we handle only Sync Edit Mode, Sync View/Selection Mode is handeled in on_click
+        
+        NOTE: on_caret events come always before on_click events, if Cudatext change this in the future the code should continue working fine
         """
         # OPTIMIZATION: exit early if sync edit mode is not active
-        # This should never happen since we only subscribe when active, but when sync edit is active in one tab then we must prevent this to run on other tabs if the user switch to another tab, otherwise we will create a session for every tab the user switch to it and of course will add overhead also, so we must keep this check
+        # This should never happen since we only subscribe to this event when the sync mode is active, but when sync edit is active in one tab then we must prevent this to run on other tabs if the user switch to another tab, otherwise we will create a session for every tab the user switch to it and of course will add overhead also, so we must keep this check
         handle = self.get_editor_handle(ed_self)
         if handle not in self.sessions: # inline has_session
             return
@@ -1582,8 +1591,7 @@ class Command:
         # Now we are in Editing mode, and caret moved with keyboard and carets are in a good state, lets check if caret is still inside the edited word
         if not self.caret_in_current_token(ed_self):
             # Caret left current token
-            self.finish_editing(ed_self)
-            
+            self.finish_editing(ed_self)            
         else:
             # caret moved, and it is still inside the word currently being edited
             # NOTE: self.redraw(ed_self) is called here to update word markers live during typing. This recalculates borders and shifts other tokens on the line as the word grows/shrinks. This is a performance hit on simple caret moves (arrow keys) but necessary for live updates.
