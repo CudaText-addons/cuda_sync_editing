@@ -94,7 +94,7 @@ def set_events_safely(events_to_add, lexer_list='', filter_str=''):
         filter_str: Filter parameter for certain events (optional)
     """
     all_events = install_inf_events | set(events_to_add)
-    event_list_str = ','.join(all_events)    
+    event_list_str = ','.join(all_events)
     app_proc(PROC_SET_EVENTS, f"cuda_sync_editing;{event_list_str};{lexer_list};{filter_str}")
 
 def bool_to_ini(value):
@@ -255,6 +255,7 @@ class Command:
         self.icon_inactive = -1
         self.icon_active = -1
         self.pending_delay_handles = set() # Track editors waiting for the 600ms lexer delay timer
+        self.pending_lexer_parse_handles = set()  # Track editors waiting for lexer parsing notification
 
 
     def get_editor_handle(self, ed_self):
@@ -386,12 +387,41 @@ class Command:
         return (line_top, line_bottom)
 
     def on_lexer_parsed(self, ed_self):
-        """Event handler for when lexer finishes parsing"""
-        print("event fired",ed_self)
-        set_events_safely([])
+        """
+        Event handler for when lexer finishes parsing (>600ms case).
+        
+        IMPORTANT: This event fires ONCE per editor when that specific editor's lexer completes.
+        The ed_self parameter tells us WHICH editor triggered the event.
+        So if Editor A and Editor B are both waiting:
+          - When Editor A finishes → on_lexer_parsed(ed_self=Editor_A) fires
+          - When Editor B finishes → on_lexer_parsed(ed_self=Editor_B) fires
+        Each call processes only the editor that triggered it (via ed_self).
+        """
+        handle = self.get_editor_handle(ed_self)
+        
+        # Only process if THIS SPECIFIC editor is waiting for lexer parsing notification
+        # This check ensures we only handle events for editors we're tracking
+        if handle not in self.pending_lexer_parse_handles:
+            return
+        
+        # Remove THIS editor from pending set (cleanup for this specific editor only)
+        self.pending_lexer_parse_handles.remove(handle)
+        
+        # Unsubscribe from on_lexer_parsed ONLY if no more editors are waiting. This keeps the event active for other editors still parsing
+        if not self.pending_lexer_parse_handles:
+            set_events_safely([])
+        
+        # i prefer show a message alert than running the sync edit, because if the user is already editing inside sync edit and we refresh he will not understand what happened and we may break what he is writing, so a message alert is more safe and inform the user of the problem
         # msg_status(_("Sync Editing: Lexer parsed. Starting..."))
         # self.start_sync_edit(ed_self, allow_timer=False)
-        msg_box(f"Sync Editing: CudaText lexer parsing has just completed. This often occurs with large files, you should restart the current Sync Edit session to ensure all duplicated identifiers are correctly found. To restart, click the gutter icon or press Esc, then click the gutter icon again.", MB_OK + MB_ICONINFO)
+        
+        # Show message to user (lexer took >600ms, so timer already fired with incomplete data)
+        tab_title = ed_self.get_prop(PROP_TAB_TITLE)
+        msg_box("Sync Editing:\n\n"
+            f"CudaText lexer parsing has just completed for the tab titled: '{tab_title}'.\n"
+            "This often occurs with large files, the initial analysis ran before all tokens were ready.\n\n"
+            "Please restart the Sync Edit session for that tab to capture all duplicated identifiers correctly.\n\n"
+            "To restart: click the gutter icon (or press Esc), then click the gutter icon again.",MB_OK + MB_ICONINFO)
 
     def lexer_timer(self, tag='', info=''):
         """600ms timer callback"""
@@ -425,6 +455,10 @@ class Command:
         """
         session = self.get_session(ed_self)
 
+        # now that we created a session we should always call update_gutter_icon_on_selection before start_sync_edit to set gutter_icon_line (set by show_gutter_icon) which will be used in start_sync_edit to set the active gutter icon
+        # Update gutter icon before starting to ensure session.gutter_icon_line is set. This allows us to flip it to "Active" mode shortly after.
+        self.update_gutter_icon_on_selection(ed_self)
+        
         # --- 1. Initial basic checks ---
 
         carets = ed_self.get_carets()
@@ -468,10 +502,15 @@ class Command:
             self.pending_delay_handles.add(handle)
             timer_proc(TIMER_START_ONE, self.lexer_timer, interval=600, tag=str(handle))
             
+            # Track this editor for lexer parsing notification (fires only if parsing >600ms)
+            self.pending_lexer_parse_handles.add(handle)
+            
             # Subscribe to on_lexer_parsed event for files that take longer than 600ms to parse
             set_events_safely(['on_lexer_parsed'])
             
-            self.reset(ed_self)
+            # Clean up visual elements but DON'T unsubscribe from events
+            self.reset(ed_self, cleanup_events=False)
+            
             msg_status(_('Sync Editing: delay start for 600ms for safety'))
             return
 
@@ -498,9 +537,6 @@ class Command:
         # Break text selection and clear visual selection to show markers instead
         ed_self.set_sel_rect(0,0,0,0)
 
-        # now that we created a session we should always call update_gutter_icon_on_selection before start_sync_edit to set gutter_icon_line (set by show_gutter_icon) which will be used in start_sync_edit to set the active gutter icon
-        # Update gutter icon before starting to ensure session.gutter_icon_line is set. This allows us to flip it to "Active" mode shortly after.
-        self.update_gutter_icon_on_selection(ed_self)
         # Update gutter icon to show active state
         if session.gutter_icon_line is not None:
             self.show_gutter_icon(ed_self, session.gutter_icon_line, active=True)
@@ -882,16 +918,35 @@ class Command:
         
         return False
 
-    def reset(self, ed_self=None):
+    def reset(self, ed_self=None, cleanup_events=True):
         """
         FULLY Exits the plugin.
         Clears markers, releases selection lock, and resets all state variables.
         Triggered via 'Toggle' command, gutter icon click, or 'ESC' key.
+        
+        Args:
+            ed_self: Editor instance
+            cleanup_events: If True, clean up event subscriptions. If False, keep events active
+                           (used during lexer parsing delay where we need events to persist)
         """
         if ed_self is None:
             ed_self = ed
         session = self.get_session(ed_self)
-
+        
+        # Clean up lexer parsing tracking only if requested
+        if cleanup_events:
+            handle = self.get_editor_handle(ed_self)
+            
+            # Clean up any pending timers
+            timer_proc(TIMER_STOP, self.lexer_timer, interval=0, tag=str(handle))
+            self.pending_delay_handles.discard(handle)
+            
+            self.pending_lexer_parse_handles.discard(handle)
+            
+            # Unsubscribe from on_lexer_parsed if no more editors are waiting
+            if not self.pending_lexer_parse_handles:
+                set_events_safely([])
+        
         # Restore original position if needed
         if session.original:
             ed_self.set_caret(session.original[0], session.original[1], id=CARET_SET_ONE)
@@ -1490,7 +1545,6 @@ class Command:
 
     def config(self):
         """Opens the plugin configuration INI file."""
-        print("sessions",self.sessions) # TODO delete
         try:
             ini_config = PluginConfig()
             file_open(ini_config.file_path)
