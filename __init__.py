@@ -1187,7 +1187,28 @@ class Command:
         carets = ed_self.get_carets()
         if not carets:
             return False
-        x0, y0, x1, y1 = carets[0]
+            
+        # x0, y0, x1, y1 = carets[0]
+        
+        idx = session.original_occurrence_index
+        # why we check for idx < len(carets)? when we switch from id to id with mouse click the multicaret first become 1 caret, so carets[idx] will gave IndexError because carets no longuer exist, so we have to use a fallback carets[0]
+        if idx < len(carets):
+            x0, y0 = carets[idx][0], carets[idx][1]
+        else:
+            x0, y0, _, _ = carets[0]
+            
+            
+        # fix case when caret leave the line like in:
+            # aaa| ccc
+            # ccc aaa| <==== move this caret
+            # aaa| ccc
+        # we get:
+            # aaa |ccc
+            # ccc aaa
+            # |aaa |ccc
+        # so if caret leave the original line of the edited word we consider the caret outside the token
+        if not y0 == session.original[1]:
+            return False
         
         # Check line index first (O(1) lookup)
         if y0 not in session.line_index:
