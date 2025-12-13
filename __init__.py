@@ -78,47 +78,58 @@ SCROLL_DEBOUNCE_DELAY = 150  # milliseconds to wait after scroll stops
 
 SHOW_PROGRESS=True
 
-_mydir = os.path.dirname(__file__)
-filename_install_inf = os.path.join(_mydir, 'install.inf')
-
-def parse_install_inf_events():
-    """
-    Parse all event sections from install.inf.
-    Returns a dict with event names as keys and their filter strings as values.
-    Example: {'on_caret_slow': 'sel', 'on_click~': '', 'on_key~': ''}
-    """
-    events_dict = {}
-    
-    # Find all sections that start with 'item'
-    item_num = 1
-    while True:
-        section = f'item{item_num}'
-        section_type = ini_read(filename_install_inf, section, 'section', '')
-        
-        if not section_type:
-            break  # No more sections
-        
-        if section_type == 'events':
-            events_str = ini_read(filename_install_inf, section, 'events', '')
-            keys_str = ini_read(filename_install_inf, section, 'keys', '')
-            
-            # Split events by comma and add to dict
-            for event in events_str.split(','):
-                event = event.strip()
-                if event:
-                    events_dict[event] = keys_str
-        
-        item_num += 1
-    
-    return events_dict
-
 
 # Check API version
 # this API introduced improved events managments: PROC_EVENTS_SUB/UNSUB, and now keys=sel,selreset for on_caret_slow works as expected too
 API_NEW = app_api_version() >= '1.0.471'
 
-# Parse install.inf events and keys ONLY if using Legacy API
+# --- 1. OPTIMIZATION FOR NEW API ---
+# If newer API, we "upgrade" on_caret_slow to use filters (sel,selreset).
+# This optimizes performance by triggering only on selection changes.
+# We do this at runtime so install.inf remains compatible with old versions. because older cudatext versions do not subscribe to on_caret_slow if we set keys=sel,selreset in install.inf see https://github.com/Alexey-T/CudaText/issues/6146
+# so to keep backward compatibility, we set only events=on_caret_slow without keys=sel,selreset in install.inf, then inside the plugin if api is greater than 1.0.471 we subscribe dynamically again to on_caret_slow but now with sel,selreset filter, this will unsub from on_caret_slow so plugin will consume no resources in new cudatext versions until the user select text. and in old versions it will use the old on_caret_slow which will run with every slow caret (not bad anyway)
+# there is only one problem, now newer cudatext versions with the new api will load the plugin always when cudatext starts, because we do not set keys=sel,selreset in install.inf. but the plugin consumes no resources anyway.
+if API_NEW:
+    # This overrides the broad on_caret_slow from install.inf
+    # Note: We must subscribe to this SEPARATELY from other events because it uses a filter list.
+    app_proc(PROC_EVENTS_SUB, 'cuda_sync_editing;on_caret_slow;;sel,selreset')
+
+# --- 2. LEGACY SUPPORT SETUP ---
+# For older API, we must parse install.inf to preserve events when using PROC_SET_EVENTS
 if not API_NEW:
+    filename_install_inf = os.path.join(os.path.dirname(__file__), 'install.inf')
+    
+    def parse_install_inf_events():
+        """
+        Parse all event sections from install.inf.
+        Returns a dict with event names as keys and their filter strings as values.
+        Example: {'on_caret_slow': 'sel', 'on_click~': '', 'on_key~': ''}
+        """
+        events_dict = {}
+        
+        # Find all sections that start with 'item'
+        item_num = 1
+        while True:
+            section = f'item{item_num}'
+            section_type = ini_read(filename_install_inf, section, 'section', '')
+            
+            if not section_type:
+                break  # No more sections
+            
+            if section_type == 'events':
+                events_str = ini_read(filename_install_inf, section, 'events', '')
+                keys_str = ini_read(filename_install_inf, section, 'keys', '')
+                
+                # Split events by comma and add to dict
+                for event in events_str.split(','):
+                    event = event.strip()
+                    if event:
+                        events_dict[event] = keys_str
+            
+            item_num += 1
+        
+        return events_dict
+
     install_inf_events = parse_install_inf_events()
 else:
     install_inf_events = {}
