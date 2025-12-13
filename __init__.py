@@ -1331,49 +1331,8 @@ class Command:
         # We cannot rely on token_ref.start_x because it is stale.
         # We must scan backwards from the caret to find where this word currently begins.
         line_text = ed_self.get_text_line(y0)
+        actual_start_x = self._find_word_start(ed_self, session, line_text, x0)
         
-        # Helper logic similar to redraw(): Backtrack to find start of ID
-        # Start scanning from caret position
-        actual_start_x = x0
-        
-        # If we are at the end of the line or word, step back one char to catch the word, otherwise when caret is at the end of the ID it will exit edit mode
-        if actual_start_x > 0 and (actual_start_x >= len(line_text) or not session.regex_identifier.match(line_text[actual_start_x:])):
-            actual_start_x -= 1
-
-        '''
-        the two checks are necesary to fix a special case:
-        position 0 is a boundary condition that needs special handling because we cannot go below it.
-        in the following example, the user edit the second ccc and delete it. we get wrong actual_start_x depending of the case, there is two cases:
-        - case1: ccc start at x=0 (no space or invalid words before ccc)
-        aaa ccc
-        ccc aaa
-
-        - case2: space before ccc
-          aaa ccc
-          ccc aaa
-        when i use only the first check inside x0 == 0 it work fine with the case1 but it breaks the case2, and if i use the second check inside x0 != 0 it works fine with case2 but breaks case1
-        now with both checks when i click on the second ccc and i delete it , it works correctly in both cases
-        '''
-        if x0 == 0:
-            # Move back as long as the regex matches the string starting at that position
-            # This aligns with how standard regex identifiers work (greedy match from left)
-            # Move back, but never below 0
-            while actual_start_x > 0:
-                # Check if a word starts here that extends to/past our caret roughly?
-                # Simpler approach: verify char by char if it's part of an ID.
-                # But since we use a regex config, we stick to the user's regex logic:
-                if not session.regex_identifier.match(line_text[actual_start_x:]):
-                    break
-                actual_start_x -= 1
-        else: # x0 != 0
-            while actual_start_x >= 0:
-                if not session.regex_identifier.match(line_text[actual_start_x:]):
-                    break
-                actual_start_x -= 1
-            actual_start_x += 1 # We went one step too far back
-            
-        if actual_start_x < 0: actual_start_x = 0
-
         # 4. Check if this is a valid word match
         print("actual_start_x",actual_start_x)
         
@@ -1969,6 +1928,57 @@ class Command:
             msg_status(_("Up/Down/Enter keys are not allowed inside Edit Mode"))
             return False
 
+    def _find_word_start(self, ed_self, session, line_text, caret_x):
+        """
+        Helper: Finds the start position of a word at the given caret position.
+        
+        Returns: actual_start_x: The x position where the word starts
+        """
+        # Start scanning from caret position
+        actual_start_x = caret_x
+        
+        # Workaround for end of id case: If we are at the end of the line or word, step back one char to catch the word, otherwise when caret is at the end of the ID it will exit edit mode
+        if actual_start_x > 0 and (actual_start_x >= len(line_text) or not session.regex_identifier.match(line_text[actual_start_x:])):
+            actual_start_x -= 1
+        
+        '''
+        Move actual_start_x back until we find the beginning of the identifier
+        Special handling for position 0 vs other positions
+        the two checks are necesary to fix a special case:
+        position 0 is a boundary condition that needs special handling because we cannot go below it.
+        in the following example, the user edit the second ccc and delete it. we get wrong actual_start_x depending of the case, there is two cases:
+        - case1: ccc start at x=0 (no space or invalid words before ccc)
+        aaa ccc
+        ccc aaa
+
+        - case2: space before ccc
+          aaa ccc
+          ccc aaa
+        when i use only the first check inside x0 == 0 it work fine with the case1 but it breaks the case2, and if i use the second check inside x0 != 0 it works fine with case2 but breaks case1
+        now with both checks when i click on the second ccc and i delete it , it works correctly in both cases
+        '''
+        if caret_x == 0:
+            # Move back as long as the regex matches the string starting at that position
+            # This aligns with how standard regex identifiers work (greedy match from left)
+            # Move back, but never below 0
+            while actual_start_x > 0:
+                if not session.regex_identifier.match(line_text[actual_start_x:]):
+                    break
+                actual_start_x -= 1
+        else: # x0 != 0
+            # Not at position 0: scan backward and adjust
+            while actual_start_x >= 0:
+                if not session.regex_identifier.match(line_text[actual_start_x:]):
+                    break
+                actual_start_x -= 1
+            actual_start_x += 1  # We went one step too far back
+        
+        # Workaround for EOL #65. Safety for EOL/BOL cases
+        if actual_start_x < 0:
+            actual_start_x = 0
+        
+        return actual_start_x
+
     def redraw(self, ed_self):
         """
         Dynamically updates markers and dictionary positions during typing.
@@ -2009,61 +2019,58 @@ class Command:
         # Get current state at the first caret
         carets = ed_self.get_carets()
         if not carets: return
-        first_y = carets[0][1]
-        first_x = carets[0][0]
+        
+        idx = session.original_occurrence_index
+        tokens_list = session.dictionary.get(old_key)
+        
+        # Validation
+        if idx is None or not tokens_list or idx >= len(carets) or idx >= len(tokens_list):
+            idx = 0 # if no idx, use the first caret, this should never happen anyway
+
+        # Get the specific Caret and TokenRef
+        first_x, first_y = carets[idx][0], carets[idx][1]
+        token_ref = tokens_list[idx]
         first_y_line = ed_self.get_text_line(first_y)
         
-        # Find start of the word under caret
-        # Clamp caret position first
-        if first_x < 0:
-            first_x = 0
-        if first_x > len(first_y_line):
-            first_x = len(first_y_line)
-        
-        start_pos = first_x
-
-        # Backtrack from caret to find start of the new word
-        # Workaround for end of id case: If caret is at the very end, move back 1 to capture the match
-        # Safety check: only move back if we're not at position 0
-        if start_pos > 0:
-            if start_pos >= len(first_y_line) or not session.regex_identifier.match(first_y_line[start_pos:]):
-                start_pos -= 1
-
-        # Move start_pos back until we find the beginning of the identifier
-        # Move back as long as the regex matches, but never below 0
-        while start_pos > 0 and session.regex_identifier.match(first_y_line[start_pos:]):
-            start_pos -= 1
-        
-        # Only increment if we actually moved back AND we're not at a match position
-        # Check if we're at position 0 and there's a match
-        if start_pos == 0:
-            if not session.regex_identifier.match(first_y_line[0:]):
-                # No match at 0, word might be deleted
-                pass
-            # If there IS a match at 0, start_pos stays at 0
-        else:
-            # We moved back, so increment to get to start of word
-            start_pos += 1
-        
-        # Final safety clamp
-        # Workaround for EOL #65. Safety for EOL/BOL cases
-        if start_pos < 0:
-            start_pos = 0
+        # Find the ACTUAL start of the word under the caret
+        # We cannot rely on token_ref.start_x because it is stale.
+        # We must scan backwards from the caret to find where this word currently begins.
+        start_pos = self._find_word_start(ed_self, session, first_y_line, first_x)
 
         # Check if word became empty (deleted) or invalid. Workaround for empty id (eg. when it was deleted) #62
         match = session.regex_identifier.match(first_y_line[start_pos:])
         
         if not match:
-            # Word was deleted completely
-            new_key = ''
-            new_length = 0
+            # no match, the user deleted the word or caret is on an invalid word (space..etc)
+            
+            # Allow empty identifiers: keep editing active if caret is still anchored at the expected token start.
+            # if the caret is at the start of the token and the caret is exactly between the start and end of the old word then the user probably deleted the word, because if the regex did not match then between start_x and end_x there is no valid word (in the past there was a word otherwise the old word would not have been saved to the dictionary in redraw()), so if there was a word between the start and end, and now there is no word between them, then this is probably a complete word delete
+            if token_ref.start_x <= first_x <= token_ref.end_x and first_x == token_ref.start_x:
+                # Word was deleted completely
+                new_key = ''
+                new_length = 0
+            else:
+                # caret is on an invalid word (space...etc), probably the user only moved the caret outside the identifier/word or he wrote an invalid word/letter like space
+                
+                # Word was deleted completely - clear markers
+                session.our_key = old_key
+                ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
+                
+                # === PROFILING STOP: REDRAW (Exit Early 2) ===
+                if ENABLE_PROFILING_inside_redraw:
+                    stop_profiling(pr_redraw, s_redraw, sort_key='cumulative', title='PROFILE: redraw (Live Typing - Exit Early 2)')
+                # ===========================================
+                
+                return
         else:
+            # Extract the new word from the match
             new_key = match.group(0)
             if not session.case_sensitive:
                 new_key = new_key.lower()
             new_length = len(new_key)
 
-        # 2. Get tokens first (we need them to calculate old_length correctly!)
+        # 2. Calculate Length Delta change
+        # Get tokens first (we need them to calculate old_length correctly!)
         edited_tokens = session.dictionary.get(old_key, [])
         if not edited_tokens:
             return
@@ -2108,27 +2115,7 @@ class Command:
                 
                 # Scan backwards to find start of the new word instance from the adjusted position
                 # here we search for the token starting from its old position
-                search_x = old_token_x
-                
-                # Only backtrack if we're not at position 0. Search backward from old position, but never below 0
-                while search_x > 0 and session.regex_identifier.match(y_line[search_x:]):
-                    search_x -= 1
-                
-                # Increment only if we moved back
-                # Check if we're at position 0 with a match
-                if search_x == 0:
-                    if not session.regex_identifier.match(y_line[0:]):
-                        # No match at 0, keep old position (shouldn't happen)
-                        search_x = old_token_x
-                    # Else: match at 0, search_x stays 0
-                else:
-                    # We moved back, increment to start of word
-                    search_x += 1
-                
-                # Safety clamp
-                # Workaround for EOL #65
-                if search_x < 0:
-                    search_x = 0
+                search_x = self._find_word_start(ed_self, session, y_line, old_token_x)
                 
                 # Update this token's position in-place
                 token_ref.start_x = search_x
@@ -2197,7 +2184,7 @@ class Command:
             session.our_key = new_key
         else:
             # Word is empty or unchanged - keep using old_key
-            # Even if text is empty, we keep the dictionary entry under old_key
+            # Even if text is empty, we keep the dictionary entry under old_key, TODO: i dont like this solution, maybe the best is to create a new variable word_deleted and set it to True here, so other parts of this plugin can know correctly if our_key should be empty or it is really the old key
             session.our_key = old_key
             
             
