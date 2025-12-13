@@ -1334,20 +1334,15 @@ class Command:
         actual_start_x = self._find_word_start(ed_self, session, line_text, x0)
         
         # 4. Check if this is a valid word match
-        print("actual_start_x",actual_start_x)
-        
         match = session.regex_identifier.match(line_text[actual_start_x:])
         if not match:
             # no match, the user deleted the word or caret is on an invalid word (space..etc)
-            print("no match")
             
             # Allow empty identifiers: keep editing active if caret is still anchored at the expected token start.
             # if the caret is at the start of the token and the caret is exactly between the start and end of the old word then the user probably deleted the word, because if the regex did not match then between start_x and end_x there is no valid word (in the past there was a word otherwise the old word would not have been saved to the dictionary in redraw()), so if there was a word between the start and end, and now there is no word between them, then this is probably a complete word delete
             if token_ref.start_x <= x0 <= token_ref.end_x and x0 == token_ref.start_x:
                 # word was deleted
-                print("word deleted")
                 return True
-            print("not valid word")
             # caret is on an invalid word (space...etc), probably the user only moved the caret outside the identifier/word or he wrote an invalid word/letter like space
             return False
         
@@ -1941,12 +1936,10 @@ class Command:
         if actual_start_x > 0 and (actual_start_x >= len(line_text) or not session.regex_identifier.match(line_text[actual_start_x:])):
             actual_start_x -= 1
         
-        '''
-        Move actual_start_x back until we find the beginning of the identifier
-        Special handling for position 0 vs other positions
-        the two checks are necesary to fix a special case:
-        position 0 is a boundary condition that needs special handling because we cannot go below it.
-        in the following example, the user edit the second ccc and delete it. we get wrong actual_start_x depending of the case, there is two cases:
+        # Move actual_start_x back until we find the beginning of the identifier as long as the regex matches the string starting at that position
+        '''Special handling for position 0 vs other positions
+        the check 'if caret_x != 0' is necesary to fix a special case:
+        in the following example, and without the check, if we edit the second ccc and delete it, we may get wrong actual_start_x depending of the case, there is two cases:
         - case1: ccc start at x=0 (no space or invalid words before ccc)
         aaa ccc
         ccc aaa
@@ -1954,29 +1947,15 @@ class Command:
         - case2: space before ccc
           aaa ccc
           ccc aaa
-        when i use only the first check inside x0 == 0 it work fine with the case1 but it breaks the case2, and if i use the second check inside x0 != 0 it works fine with case2 but breaks case1
-        now with both checks when i click on the second ccc and i delete it , it works correctly in both cases
-        '''
-        if caret_x == 0:
-            # Move back as long as the regex matches the string starting at that position
-            # This aligns with how standard regex identifiers work (greedy match from left)
-            # Move back, but never below 0
-            while actual_start_x > 0:
-                if not session.regex_identifier.match(line_text[actual_start_x:]):
-                    break
-                actual_start_x -= 1
-        else: # x0 != 0
+        without caret_x != 0 case2 works fine but case1 breaks'''
+        if caret_x != 0:
             # Not at position 0: scan backward and adjust
             while actual_start_x >= 0:
                 if not session.regex_identifier.match(line_text[actual_start_x:]):
                     break
                 actual_start_x -= 1
             actual_start_x += 1  # We went one step too far back
-        
-        # Workaround for EOL #65. Safety for EOL/BOL cases
-        if actual_start_x < 0:
-            actual_start_x = 0
-        
+            
         return actual_start_x
 
     def redraw(self, ed_self):
@@ -2243,9 +2222,6 @@ class Command:
     def config(self):
         """Opens the plugin configuration INI file."""
         session = self.get_session(ed)
-        print("self.word_colors",session.word_colors)
-        print("self.sessions",self.sessions)
-        print("self.pending_lexer_parse_handles",self.pending_lexer_parse_handles)
         try:
             ini_config = PluginConfig()
             file_open(ini_config.file_path)
