@@ -6,6 +6,7 @@
 import re
 import os
 import time
+import random
 from cudatext import *
 from cudatext_keys import *
 from cudax_lib import get_translation
@@ -278,6 +279,14 @@ def theme_color(name, is_font):
         return theme[name]['color_font' if is_font else 'color_back']
     return 0x808080
 
+def generate_color(key):
+    # get random color for a given key
+    hash_val = hash(key) + random.randint(0, 0xFFFFFF)
+    r = ((hash_val & 0xFF0000) >> 16) % 127 + 128
+    g = ((hash_val & 0x00FF00) >> 8) % 127 + 128
+    b = (hash_val & 0x0000FF) % 127 + 128
+    return r | (g << 8) | (b << 16)
+    
 class TokenRef:
     """
     Mutable token reference for efficient in-place updates. this is better than immutable tuples because it avoids recreation overhead during edits.
@@ -970,10 +979,11 @@ class Command:
         
         # Pre-generate all colors to maintain consistency of colors when switching between View and Edit mode, so words will have the same color always inside the same session, and this reduce overhead also
         if session.use_colors:
+            rdm = random.randint(0, 0xFFFFFF)
             session.word_colors = {
-                key: (((hash(key) & 0xFF0000) >> 16) % 127 + 128) |
-                     ((((hash(key) & 0x00FF00) >> 8) % 127 + 128) << 8) |
-                     (((hash(key) & 0x0000FF) % 127 + 128) << 16)
+                key: ((((hash(key) + rdm) & 0xFF0000) >> 16) % 127 + 128) |
+                     (((((hash(key) + rdm) & 0x00FF00) >> 8) % 127 + 128) << 8) |
+                     ((((hash(key) + rdm) & 0x0000FF) % 127 + 128) << 16)
                 for key in session.dictionary
             }
         else:
@@ -1046,9 +1056,12 @@ class Command:
         markers_to_add = []
         
         for key in session.dictionary:
-            # Get pre-generated color for this word
-            color = session.word_colors.get(key, 0x00FFFF) # when user edit a word it becomes a new word so it have no cached color in word_colors, so it will use 0x00FFFF:yellow, i found this better than generating a new color because it allows to easly identify which words were changed
-            
+            # Get pre-generated color for this word or generate a new color for new words (edited words become new words after edits)
+            color = session.word_colors.get(key)
+            if color is None:
+                color = generate_color(key)
+                session.word_colors[key] = color
+                            
             for token_ref in session.dictionary[key]:
                 # OPTIMIZATION: Only add markers for the visible lines of the VIEWPORT
                 if line_top <= token_ref.start_y <= line_bottom:
@@ -1286,7 +1299,6 @@ class Command:
         actual_start_x = x0
         
         # If we are at the end of the line or word, step back one char to catch the word
-        # (e.g. typing at the end: 'cccd|')
         if actual_start_x > 0 and (actual_start_x >= len(line_text) or not session.regex_identifier.match(line_text[actual_start_x:])):
             actual_start_x -= 1
 
@@ -1938,8 +1950,9 @@ class Command:
         if start_pos < 0:
             start_pos = 0
 
-        # Check if word became empty (deleted). Workaround for empty id (eg. when it was deleted) #62
+        # Check if word became empty (deleted) or invalid. Workaround for empty id (eg. when it was deleted) #62
         match = session.regex_identifier.match(first_y_line[start_pos:])
+        
         if not match:
             # Word was deleted completely
             session.our_key = old_key
@@ -1951,6 +1964,7 @@ class Command:
             # ===========================================
             return
 
+        # Extract the new word from the match
         new_key = match.group(0)
         if not session.case_sensitive:
             new_key = new_key.lower()
