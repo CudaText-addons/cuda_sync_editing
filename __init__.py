@@ -288,6 +288,11 @@ class SyncEditSession:
 
         self.original_occurrence_index = None  # Tracks which occurrence (0, 1, 2...) the user originally clicked
 
+        # Cache carets state for detecting problematic movements, for fast caret integrity validation
+        # Built once from dictionary, reused for all subsequent checks during editing
+        # More efficient than re-accessing dictionary on every keystroke
+        self.cached_carets_count = None   # Number of carets we expect
+        self.cached_carets_lines = None   # List of y positions (line numbers (ordered)) where carets should be
 
 class Command:
     """
@@ -1124,6 +1129,7 @@ class Command:
         """
         # Reset to single caret at the position corresponding to the originally clicked occurrence
         carets = ed_self.get_carets()
+        print("reset carets",carets)
         if carets and session.original_occurrence_index is not None:
             # Carets are sorted by (y, x), same order as our dictionary tokens
             # The Nth occurrence corresponds to the Nth caret
@@ -1149,10 +1155,18 @@ class Command:
                 # Normal case: Use the caret at the occurrence index
                 # This caret has moved with the user's arrow key presses and is at the correct position
                 final_x, final_y = carets[idx][0], carets[idx][1]
+                print("reset carets final_x, final_y, idx",final_x, final_y, idx)
             else:
-                # Fallback case2: Use first caret (should rarely/never happen)
-                # Better to land somewhere reasonable than to crash with IndexError
+                # if session.original:
+                    # Fallback case1: Use the position of the original word where the user clicked the first time
+                    # final_x, final_y = session.original[0], session.original[1]
+                # else:
+                    # Fallback case2: Use first caret (should rarely/never happen)
+                    # Better to land somewhere reasonable than to crash with IndexError
+                    # final_x, final_y = carets[0][0], carets[0][1]
                 final_x, final_y = carets[0][0], carets[0][1]
+                print("reset carets carets[0]",final_x, final_y)
+
             
             # Set single caret at the determined position
             # This removes all other carets and places one caret at (final_x, final_y)
@@ -1165,7 +1179,11 @@ class Command:
         session.editing = False
         session.our_key = None
         session.original = None
-        session.original_occurrence_index = None  # Clear the tracked index
+        session.original_occurrence_index = None
+        
+        # Clear caret cache (will be rebuilt on next edit session)
+        session.cached_carets_count = None
+        session.cached_carets_lines = None
 
         # Re-paint markers so user can see what else to edit (ONLY VISIBLE VIEWPORT PORTION)
         if colorize:
@@ -1354,6 +1372,7 @@ class Command:
 
         caret = carets[0]
         clicked_x, clicked_y = caret[0], caret[1]
+        print("===========on_click========start",clicked_x, clicked_y)
 
         # Find which word was clicked (fast O(1) lookup via line_index)
         clicked_key = None
@@ -1417,6 +1436,7 @@ class Command:
         markers_to_add = []
         
         for token_ref in session.dictionary[clicked_key]:
+            print("token_ref.start_y",token_ref.start_y,token_ref.start_x)
             # Add caret to ALL instances (editing must work on all words)
             all_carets.append((
                 token_ref.start_y,  # y
@@ -1436,6 +1456,9 @@ class Command:
         all_carets.sort(key=lambda c: (c[0], c[1]))
         markers_to_add.sort(key=lambda m: (m[0], m[1]))
         
+        for ccc in all_carets:
+            print("ccc",ccc[0],ccc[1])
+            
         # Add active borders ONLY to visible VIEWPORT instances of the clicked word
         for y, x, length in markers_to_add:
             ed_self.attr(MARKERS_ADD, tag=MARKER_CODE,
@@ -1484,10 +1507,16 @@ class Command:
         # - Later when user moves with arrows, ALL carets move together but maintain their relative order
         # - Caret at index 1 always corresponds to the word occurrence at index 1, even after movements
         # find more info about this in 'SOLVE THE CARET POSITIONING PROBLEM' in finish_editing()
+        print("on_click",clicked_y,clicked_x)
         for i, token_ref in enumerate(session.dictionary[clicked_key]):
             if token_ref.start_y == clicked_y and token_ref.start_x <= clicked_x <= token_ref.end_x:
+                print("on_click token_ref.start_x y",token_ref.start_y,token_ref.start_x,i)
                 session.original_occurrence_index = i
                 break
+
+        # Reset caret cache so integrity checks rebuild it for the new word
+        session.cached_carets_count = None
+        session.cached_carets_lines = None
 
     def on_click_gutter(self, ed_self, _state, nline, _nband):
         """
@@ -1525,11 +1554,15 @@ class Command:
     # on_caret_slow is better because it will consume less resources but it breaks the colors recalculations when user edit an ID, so stick with on_caret
         """
         Hooks into caret movement during active sync editing session.
+        includes integrity checking to detect when CudaText removes carets.
+        
         Continuous Edit Logic:
         If the user moves the caret OUTSIDE the active word, we do NOT exit immediately.
         We check if the landing spot is another valid ID.
         - If landing on valid ID: Do nothing (let on_click handle the switch seamlessly).
         - If landing elsewhere: We 'finish' the edit, return to Selection mode, and show colors.
+        
+        Includes INTEGRITY CHECK to detect and exit if caret integrity is compromised (carets removed or moved to different lines).
         
         NOTE: This event is ONLY subscribed during active sync sessions (dynamically).
         """
@@ -1542,6 +1575,12 @@ class Command:
         # Now we know sync edit is active, get session and exit early if we are not in editing mode, view/selection mode should not be processed here (by on_caret) we do it in on_click
         session = self.sessions[handle]
         if not session.editing:
+            return
+        
+        # Check caret integrity FIRST: Detect if carets were lost or jumped to another line
+        if not self._validate_carets_integrity(ed_self):
+            msg_status(_("Caret integrity compromised (carets removed or moved to different lines) - exiting Sync Edit Mode"))
+            self.finish_editing(ed_self)
             return
         
         # Now we are in Editing mode, and caret moved with keyboard or mouse, lets check if caret is still inside the edited word
@@ -1573,29 +1612,41 @@ class Command:
             '''
             # clicked_x, clicked_y = carets[0][0], carets[0][1]
 
+            print("carets",carets)
             # Use the stored index to find the specific caret the user is tracking.
             # Fallback to 0 if the index is somehow invalid (safety).
             idx = session.original_occurrence_index
             if idx is not None and idx < len(carets):
+                print("using original_occurrence_index",idx)
                 clicked_x, clicked_y = carets[idx][0], carets[idx][1]
             else:
                 # Fallback to first caret if something went wrong
+                print("using carets[0]")
                 clicked_x, clicked_y = carets[0][0], carets[0][1]
 
-            # Check if caret is on a valid ID
+            # clicked_x, clicked_y = session.original[0], session.original[1]
+            
+            print("on_caret caret outside id clicked_x, clicked_y",clicked_x, clicked_y)
+            
+            # Check if caret is on a valid ID (ID to ID switch logic)
             # Use line index for fast lookup
             clicked_key = None
             if clicked_y in session.line_index:
                 for token_ref, key in session.line_index[clicked_y]:
                     if clicked_x >= token_ref.start_x and clicked_x <= token_ref.end_x:
+                        print("token_ref.start_x end_x",token_ref.start_x,token_ref.end_x)
+                        print("clicked_x",clicked_x)
                         clicked_key = key
                         break
 
+            print("===clicked_key",clicked_key)
             if not clicked_key:
+                print("not clicked_key")
                 # caret is NOT on a valid ID, finish editing mode and show colors (return to selection/view mode)
                 self.finish_editing(ed_self)
             # elif clicked_key != session.our_key:
             else:
+                print("ID to ID switch")
                 # ID to ID switch: caret is on a valid ID: 
                 # how can this happen? this happen only when user do direct click or 
                 # move caret with keyoard down/up keys and caret lands on another valid but
@@ -1668,6 +1719,59 @@ class Command:
             # This recalculates borders and shifts other tokens on the line as the word grows/shrinks. This is a performance hit on simple caret moves (arrow keys) but necessary for live updates.
             self.redraw(ed_self)
             print("on_caret redraw")
+
+    def _validate_carets_integrity(self, ed_self):
+        """
+        Validates that carets are still in a valid state for sync editing.
+        Returns True if carets are valid, False if they've been corrupted.
+        
+        Uses the Dictionary as the Source of Truth.
+
+        INTEGRITY CHECK: Detects:
+        1. Number of carets changed (some were removed by CudaText)
+        2. Carets moved to different lines (vertical movement or line wrap)
+        
+        Detect if carets were lost (hit EOF/Start, this can never happen now because we block up/down key) or carets jumped to another line (Left/Right keys at EOL)
+        We validate that the physical carets match our internal token records.
+        
+        Why? when the user press left or right keyboard keys, if the carets are at the end of line and the user press left/right keys the carets at the end of line will jump to the next line while carets in the middle of line will continue inside the edited words, so this breaks editing words, so when this happens we have to exit sync edit mode and return to view/selection mode, so we have to make a cache of carets, and every time there is a carets movements we check the y position of all the current carets to the cached one and if one of them changed or the total of carets is diferent then we stop sync edit mode
+        """
+        
+        session = self.get_session(ed_self)
+        if not session.editing or not session.our_key:
+            return True
+        
+        # Build cache on first call only
+        # After this, we never touch the dictionary again during this edit session
+        if session.cached_carets_lines is None:
+            # Source of Truth: The tokens we are currently editing
+            tokens = session.dictionary.get(session.our_key, [])
+            if not tokens:
+                return False
+            
+            # Cache both count and line positions
+            session.cached_carets_count = len(tokens)
+            session.cached_carets_lines = [token.start_y for token in tokens]
+        
+        current_carets = ed_self.get_carets()
+        if not current_carets:
+            return False
+        
+        # Check 1: Count Check. If number of carets changed (e.g. hit EOF), we lost sync. Catches cases where CudaText removed carets at file boundaries
+        if len(current_carets) != session.cached_carets_count:
+            return False
+        
+        # Check 2: Y-Position Check: Carets must stay on the same line as their token.
+        # If a caret moves to a different line (Left/Right at EOL), cy will change, ensuring this check fails so we exit edit mode.
+        # - Up/Down arrow or Enter keys that moved carets to different lines (must never happen now because we block those keys in on_key)
+        # - Left/Right at EOL that wrapped carets to next line
+        # - Any vertical movement that breaks sync
+        for i, (cx, cy, _, _) in enumerate(current_carets):
+            # We assume tokens are sorted (y,x) and get_carets returns sorted (y,x).
+            if cy != session.cached_carets_lines[i]:
+                return False
+                
+        return True
 
     def on_scroll(self, ed_self):
         """
@@ -1787,15 +1891,42 @@ class Command:
 
     def on_key(self, ed_self, key, _state):
         """
-        Handles Esc Keyboard input to cancel sync editing.
-        Strict Exit Logic: Only VK_ESCAPE triggers the full 'reset' (Exit).
+        Handles Esc Keyboard input to cancel sync editing, and blocks problematic keys.
+        1. VK_ESCAPE: Cancel sync editing completely.
+        2. VK_UP/DOWN/ENTER: BLock them to avoid caret desync / line breaking.
         """
         # OPTIMIZATION: exit early if sync edit mode is not active
         if not self.has_session(ed_self):
             return
 
+        session = self.get_session(ed_self)
+        
+        # Only check problematic keys during editing mode
+        if not session.editing:
+            return
+        
         if key == VK_ESCAPE:
             self.reset(ed_self)
+            return False
+
+        # sometimes when i move the carets with the keyboard up and down key some carets are removed when they found no place where to land (start of file or end of file or an empty line with no place where to put multiple carets ), this problem breaks a lot of things in the plugin, for example original_occurrence_index will point to the wrong index because the total number of carets changed so for example if there was 10 carets, after the caret movement they become 5 carets, so ed_self.get_carets() will return 5 carets, but original_occurrence_index is still pointing to the one of the old 10 carets. to fix this we have to disable up and down keys
+        # enter key is also problematic and would create multi-line editing chaos, so we have to disable it too
+        
+        # Keys that can break caret integrity
+        problematic_keys = {
+            VK_UP,      # may remove carets at top of file
+            VK_DOWN,    # may remove carets at bottom of file  
+            VK_ENTER,   # Would create multi-line editing chaos because it breaks the line (changing Y), which invalidates our dictionary Y-coords.
+        }
+        
+        if key in problematic_keys:
+            # met1: Exit editing mode and return to selection/view mode
+            # self.finish_editing(ed_self)
+            # return True
+            
+            # met2: Prevent the key from being processed
+            # Allow the user to continue editing and print a status bar message 
+            msg_status(_("Up/Down/Enter keys are not allowed inside Edit Mode"))
             return False
 
     def redraw(self, ed_self):
