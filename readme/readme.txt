@@ -9,13 +9,15 @@ Basic usage
 1. Select a block of text (one or multiple lines) containing the identifiers you want to edit.
 
 2. Activation:
-   - An icon will appear in the Gutter (left margin) on the last line of your selection.
+   - An icon will appear in the Gutter (left margin) within your selection. If you scroll, it will move to stay visible in the viewport as long as the selection exists.
    - Click this Gutter Icon to enter en Editing mode. Or use the menu: Plugins / Sync Editing / Activate.
 
 3. Editing:
    - The selection highlights are replaced by colored markers.
-   - Click on any colored word. Multi-carets will appear on all identical words in that block.
+   - Click on any colored word.
+   - Multi-carets will appear on all identical words in that block.
    - Type to rename them all at once.
+     Restriction: The UP, DOWN, and ENTER keys are disabled during editing to ensure all multiple cursors stay perfectly synchronized. Use LEFT/RIGHT to navigate within the word.
 
 4. Switch Words (Continuous Editing):
    - To edit a different word in the same block, simply click on it.
@@ -147,6 +149,10 @@ Notes
 -----
 - The plugin automatically uses "Simple Naive Mode" (Regex only) for: Markdown, reStructuredText, Textile, ToDo, Todo.txt, JSON and Ini files.
 - Identifiers inside 'Comments' or 'Strings' are usually ignored unless `use_simple_naive_mode` is set to true.
+- The plugin is optimized for large files and therefore only tracks changes made while in Edit Mode (when the multi-carets are active).
+    - Limitation on Writing: Writing or pasting new text outside of the currently colored (selected) identifiers while in Selection/View Mode is not supported.
+    - Why? To maintain performance on massive files (e.g., 9MB with 400k duplicates), the file analysis is only run once at the start of the session. Re-running the analysis to detect new identifiers after every single change outside of an active edit would cause a noticeable 6+ second delay on big files.
+    - Workaround: If you write new code outside of the currently colored identifiers, simply Exit the Sync Edit session (Esc or Gutter Icon) and Reactivate it. The plugin will immediately scan the modified file content.
 
 
 Troubleshooting
@@ -155,6 +161,9 @@ Troubleshooting
 - "No editable identifiers found":
   If you see this message, then the plugin likely thinks your selection contains only Keywords or Comments. Try setting `use_simple_naive_mode=true` for that lexer to bypass this check, or configure that specific lexer as explained above.
 
+- "CudaText lexer parsing has just completed..." Message:
+  This message appears when opening very large files. It means CudaText hadn't finished analyzing the syntax when you started the Sync Edit session, so some tokens might have been missed.
+  Solution: Simply click the Gutter Icon (or press Esc) to stop, then click the icon again to restart. The session will now capture all identifiers correctly.
 
 About
 -----
@@ -162,5 +171,6 @@ About
 Authors:
   - Vladislav Utkin (https://github.com/viad00) - Original author.
   - Alexey Torgashin (CudaText) - Made some bug fixes and other improvements.
-  - Badr Elmers (https://github.com/badrelmers) - Made a big refactoring by adding: Continous Edit mode, Multisession files edit, gutter activation and optimized the code for speed.
+  - Badr Elmers (https://github.com/badrelmers) - Major refactoring: Added Continuous Edit mode, Multisession files edit, gutter activation and optimized the code for speed.
+
 License: MIT

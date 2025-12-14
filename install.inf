@@ -7,24 +7,25 @@ homepage=https://github.com/CudaText-addons/cuda_sync_editing
 
 [item1]
 section=events
-events=on_caret,on_click~,on_key~,on_click_gutter~,on_close~,on_open_reopen~
+; note: inside the code we subscribe dynamically when needed to 'on_lexer_parsed', 'on_scroll', 'on_caret', 'on_click', 'on_key', 'on_open_reopen'
+events=on_caret_slow,on_click_gutter~,on_close~
 
-[item2]
+[item10]
 section=commands
 caption=Sync Editing\Activate
 method=toggle
 
-[item3]
+[item11]
 section=commands
 caption=Sync Editing\Cancel
 method=reset
 
-[item6]
+[item12]
 section=commands
 caption=Sync Editing\Emulate mouse click
 method=doclick
 
-[item10]
+[item30]
 section=commands
 caption=Sync Editing\Config
 method=config
