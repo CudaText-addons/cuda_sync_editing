@@ -1,3 +1,15 @@
+2025.12.14 (patches by @badrelmers)
++ add: Big optimization for huge files: editing a word went from 48s to 0.0065s on 9mb file with 400k duplicates, and the first start scan went from 14min to 6s (issue #23)
++ add: Spatial Indexing for O(1) token lookup on large files.
++ add: Support for CudaText API PROC_EVENTS_SUB (sel, selreset) for zero-idle CPU/RAM usage.
++ add: Dynamic subscription to events (on_caret, on_scroll, on_key, on_click, etc.) to minimize resource usage.
+* change: Markers (borders/backgrounds) now only render for the visible viewport (continous on scroll live updates).
+* change: Implemented geometry-based length calculation for accurate token tracking.
+* change: Gutter Icon now follows the viewport, ensuring it's always visible.
+- fix: Solved the Caret problems: fixed all bugs related to caret jumping/movement after edits (issues #6, #7, #28).
+- fix: Fixed logic for handling complete word/ID deletion during an edit session.
+- fix: Resolved issues with the CudaText late lexer parsing for very large files.
+
 2025.12.01 (by @badrelmers)
 + add: big optimization for huge files: e.g. 8Mb JavaScript file (if enabled by app's option "ui_max_size_lexer":9) is now processed ~30 times faster
 
