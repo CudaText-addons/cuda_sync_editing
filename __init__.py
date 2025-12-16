@@ -1538,6 +1538,10 @@ class Command:
         session.cached_carets_count = None
         session.cached_carets_lines = None
 
+        # Show status message with total count of edited words/IDs
+        total_count = len(session.dictionary[clicked_key])
+        msg_status(_(f'Sync Editing: Editing "{clicked_key}" ({total_count} occurrences)'))
+
     def on_click_gutter(self, ed_self, _state, nline, _nband):
         """
         Handles clicks on the gutter area.
