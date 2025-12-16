@@ -84,6 +84,9 @@ SHOW_PROGRESS=True
 # this API introduced improved events managments: PROC_EVENTS_SUB/UNSUB, and now keys=sel,selreset for on_caret_slow works as expected too
 API_NEW = app_api_version() >= '1.0.471'
 
+# New API flag for faster multi-caret operations (no sort during CARET_ADD)
+CARETFLAG_NO_SORT = CARET_OPTION_NO_SORT if API_NEW else 0
+
 # --- 1. OPTIMIZATION FOR NEW API ---
 # If newer API, we "upgrade" on_caret_slow to use filters (sel,selreset).
 # This optimizes performance by triggering only on selection changes.
@@ -1384,7 +1387,7 @@ class Command:
         # Does the word we found match the expected position of our tracked token?
         if actual_start_x == expected_start_x:
             return True
-            
+
         return False
 
     def reset(self, ed_self=None, cleanup_lexer_events=True):
@@ -1581,12 +1584,26 @@ class Command:
                 border_down=1,
                 border_up=1
             )
-        
+                 
+        # calling CARET_DELETE_ALL before CARET_OPTION_NO_SORT is necesary to get unique carets, otherwise we will need to call CARET_SORT after calling CARET_OPTION_NO_SORT
+        ed_self.set_caret(0, 0, id=CARET_DELETE_ALL)
+
         # Add secondary caret at the corresponding offset
         # Add carets to ALL instances (not just visible VIEWPORT ones)
+        # Uses NO_EVENT and NO_SORT options for performance with large number of carets, NO_SORT reduces setting 20k carets from 30s to few ms
+        # when using CARET_OPTION_NO_SORT we need to call CARET_DELETE_ALL and use sorted carets or call CARET_SORT that does this automatically, this is very important to get correct carets in get_carets
         for y, x, off in all_carets:
-            ed_self.set_caret(x + off, y, id=CARET_ADD, options=CARET_OPTION_NO_EVENT)
+            ed_self.set_caret(x + off, y, id=CARET_ADD, options=CARET_OPTION_NO_EVENT + CARETFLAG_NO_SORT)
+        
+        # Sort carets once after all additions (much faster than sorting on each add)
+        # this is not needed because we already called CARET_DELETE_ALL and we used sorted carets when we called CARET_ADD, but i keep it because it is fast and adds no overhead and it is more secure (a defensive solution), because maybe the CARET_SORT get new fixes in the future that are not handeled by the above fixes (sorting and deleting carets). this seems paranoic but i should be, because the plugin is based on carets, and uses the carets sorting order everywhere in the functions, so if something is wrong with the carets sorting, the end user will get silent bugs, so it is better to be paranoid here than earning some millisecond.
+        # CARET_OPTION_NO_EVENT is very important here otherwise we get on_caret event before sorting the carets which breaks the plugin functions that runs on on_caret event!
+        if API_NEW:
+            ed_self.set_caret(0, 0, id=CARET_SORT, options=CARET_OPTION_NO_EVENT)
 
+        # Force repaint (seems NOT NEEDED - CudaText does this automatically)
+        ed_self.action(EDACTION_UPDATE)
+        
         # === PROFILING STOP: BENCHMARKING ID-to-ID SWITCH ===
         if is_switch:
             if ENABLE_PROFILING_inside_on_click:
