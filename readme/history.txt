@@ -1,3 +1,7 @@
+2025.12.16 (patches by @badrelmers)
++ add: Optimization for faster caret placement: Implemented CARET_OPTION_NO_SORT to fix slow carets setting when switching from one ID to another in big files (speed went from 6s to instant for 20k carets).
+* change: Improved fix for late lexer tokens parsing by replacing on_lexer_parsed with the new good API PROP_LEXER_BUSY (removed dependency on on_lexer_parsed event and related timers and its dirty workarounds).
+
 2025.12.14 (patches by @badrelmers)
 + add: Big optimization for huge files: editing a word went from 48s to 0.0065s on 9mb file with 400k duplicates, and the first start scan went from 14min to 6s (issue #23)
 + add: Spatial Indexing for O(1) token lookup on large files.

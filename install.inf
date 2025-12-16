@@ -7,7 +7,7 @@ homepage=https://github.com/CudaText-addons/cuda_sync_editing
 
 [item1]
 section=events
-; note: inside the code we subscribe dynamically when needed to 'on_lexer_parsed', 'on_scroll', 'on_caret', 'on_click', 'on_key', 'on_open_reopen'
+; note: inside the code we subscribe dynamically when needed to 'on_scroll', 'on_caret', 'on_click', 'on_key', 'on_open_reopen'
 events=on_caret_slow,on_click_gutter~,on_close~
 
 [item10]
