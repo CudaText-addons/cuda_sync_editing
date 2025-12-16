@@ -651,7 +651,7 @@ class Command:
         # Check if lexer is busy (only for non-naive lexers)
         # when we call start_sync_edit() on a big file that uses a lexer we may get wrong results if the user just opened it recently, because Cudatext takes some time to parse and set tokens (Id, comments, strings..etc), this means that start_sync_edit will get wrong results because it will have few token or none, because cudatext did not return all tokens with get_token(TOKEN_LIST_SUB ...), so to fix this problem we use PROP_LEXER_BUSY it is a lot better, easier, simpler and safer than subscribing to on_lexer_parsed event which have a lot of challenges to implement it correctly.
         if not use_simple_naive_mode:
-            lexer_busy = ed_self.get_prop(PROP_LEXER_BUSY)
+            lexer_busy = API_NEW and ed_self.get_prop(PROP_LEXER_BUSY)
             if lexer_busy:
                 self.reset(ed_self)
                 tab_title = ed_self.get_prop(PROP_TAB_TITLE)
