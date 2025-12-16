@@ -1540,7 +1540,7 @@ class Command:
 
         # Show status message with total count of edited words/IDs
         total_count = len(session.dictionary[clicked_key])
-        msg_status(_(f'Sync Editing: Editing "{clicked_key}" ({total_count} occurrences)'))
+        msg_status(_('Sync Editing: Editing "%s" (%d occurrences)') % (clicked_key, total_count))
 
     def on_click_gutter(self, ed_self, _state, nline, _nband):
         """
