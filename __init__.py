@@ -655,10 +655,11 @@ class Command:
             if lexer_busy:
                 self.reset(ed_self)
                 tab_title = ed_self.get_prop(PROP_TAB_TITLE)
-                msg_box("Sync Editing:\n\n"
-                    f"CudaText is still parsing the file: '{tab_title}'.\n"
-                    "This typically occurs with large files.\n\n"
-                    "Please wait a few seconds and try again.",MB_OK + MB_ICONINFO)
+                msg_box("Sync Editing:\n\n" +
+                    _("CudaText is still parsing the file: '%s'.") % tab_title + "\n" +
+                    _("This typically occurs with large files.") + "\n\n" +
+                    _("Please wait a few seconds and try again."),
+                    MB_OK + MB_ICONINFO)
                 return
 
         # --- 3. Start ---
