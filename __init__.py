@@ -659,7 +659,6 @@ class Command:
                     f"CudaText is still parsing the file: '{tab_title}'.\n"
                     "This typically occurs with large files.\n\n"
                     "Please wait a few seconds and try again.",MB_OK + MB_ICONINFO)
-                restore_caret(caret, keep_selection=True)
                 return
 
         # --- 3. Start ---
