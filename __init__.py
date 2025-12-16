@@ -102,7 +102,7 @@ if API_NEW:
 # For older API, we must parse install.inf to preserve events when using PROC_SET_EVENTS
 if not API_NEW:
     filename_install_inf = os.path.join(os.path.dirname(__file__), 'install.inf')
-    
+
     def parse_install_inf_events():
         """
         Parse all event sections from install.inf.
@@ -110,28 +110,28 @@ if not API_NEW:
         Example: {'on_caret_slow': 'sel', 'on_click~': '', 'on_key~': ''}
         """
         events_dict = {}
-        
+
         # Find all sections that start with 'item'
         item_num = 1
         while True:
             section = f'item{item_num}'
             section_type = ini_read(filename_install_inf, section, 'section', '')
-            
+
             if not section_type:
                 break  # No more sections
-            
+
             if section_type == 'events':
                 events_str = ini_read(filename_install_inf, section, 'events', '')
                 keys_str = ini_read(filename_install_inf, section, 'keys', '')
-                
+
                 # Split events by comma and add to dict
                 for event in events_str.split(','):
                     event = event.strip()
                     if event:
                         events_dict[event] = keys_str
-            
+
             item_num += 1
-        
+
         return events_dict
 
     install_inf_events = parse_install_inf_events()
@@ -142,67 +142,67 @@ else:
 def set_events_safely(events_to_add, lexer_list=''):
     """
     Set events dynamically based on API version.
-    
+
     API >= 1.0.471:
       - Uses PROC_EVENTS_SUB/UNSUB.
       - Manages only dynamic events (on_scroll, on_caret, on_click, on_key, on_open_reopen).
       - Static events in install.inf are preserved automatically by CudaText.
-      
+
     API < 1.0.471:
       - Uses PROC_SET_EVENTS.
-      - Merges install.inf events but FORCEFULLY STRIPS keys/filters 
+      - Merges install.inf events but FORCEFULLY STRIPS keys/filters
         (ignoring 'sel,selreset') to avoid old API bugs.
-        
+
     Args:
         events_to_add: Set or list of event names to add (without filter strings)
         lexer_list: Comma-separated lexer names (optional)
     """
-    
+
     if API_NEW:
         # --- NEW API LOGIC ---
-        
+
         # 1. Define dynamic events managed by this plugin
         DYNAMIC_EVENTS = {'on_scroll', 'on_caret', 'on_click', 'on_key', 'on_open_reopen'}
-        
+
         # 2. Unsubscribe from dynamic events that are NOT in the needed list
         # We must explicitly unsub to turn them off, otherwise they stick around.
         current_needed = set(events_to_add)
         to_unsub = [ev for ev in DYNAMIC_EVENTS if ev not in current_needed]
-        
+
         if to_unsub:
             app_proc(PROC_EVENTS_UNSUB, f'cuda_sync_editing;{",".join(to_unsub)}')
-            
+
         # 3. Subscribe to the needed dynamic events
         # Note: These dynamic events do not use filters in this context, so we pass empty filter args.
         if events_to_add:
             # Format: "module;event_list;lexer_list;filter_list"
             events_str = ','.join(events_to_add)
             app_proc(PROC_EVENTS_SUB, f'cuda_sync_editing;{events_str};{lexer_list};;')
-            
+
     else:
         # --- LEGACY API LOGIC (Old CudaText) ---
-        
+
         # in the old API we have to set events while preserving those from install.inf. because PROC_SET_EVENTS resets all the events including those from install.inf (only events in plugins.ini are preserved).
         # and also we should not use on_caret_slow keys filters like sel and selreset, the old API was buged, so when we parse install.inf we must remove them when we subscribe dynamically to on_caret_slow. this will not break this plugin because on_caret_slow events are suficient to detect text selections without using sel/selreset.
-        
+
         # Combine install.inf events with new events
         all_events = {}
-        
+
         # Add install.inf events (on_caret_slow, on_close, on_click_gutter) but FORCE empty filters (ignore keys like 'sel,selreset')
         for ev in install_inf_events:
-            all_events[ev] = '' 
-        
+            all_events[ev] = ''
+
         # Add new dynamic events (on_key, on_click, etc.), without filters
         for event in events_to_add:
             if event not in all_events:
                 all_events[event] = ''
-        
+
         # Build event string
         event_names = ','.join(all_events.keys())
-        
+
         # Filter string is explicitly empty because we stripped keys from install.inf events
         filter_strings = ''
-        
+
         app_proc(PROC_SET_EVENTS, f"cuda_sync_editing;{event_names};{lexer_list};{filter_strings}")
 
 def bool_to_ini(value):
@@ -289,13 +289,13 @@ def generate_color(key):
     g = ((hash_val & 0x00FF00) >> 8) % 127 + 128
     b = (hash_val & 0x0000FF) % 127 + 128
     return r | (g << 8) | (b << 16)
-    
+
 class TokenRef:
     """
     Mutable token reference for efficient in-place updates. this is better than immutable tuples because it avoids recreation overhead during edits.
     """
     __slots__ = ['start_x', 'start_y', 'end_x', 'end_y', 'text', 'style']
-    
+
     def __init__(self, start_x, start_y, end_x, end_y, text, style):
         self.start_x = start_x
         self.start_y = start_y
@@ -303,7 +303,7 @@ class TokenRef:
         self.end_y = end_y
         self.text = text
         self.style = style
-    
+
     def shift(self, delta):
         """Shift position by delta characters (in-place update)."""
         self.start_x += delta
@@ -319,16 +319,16 @@ class SyncEditSession:
     def __init__(self):
         self.selected = False
         self.editing = False
-        
+
         # OPTIMIZATION: Line-based spatial index for O(1) line lookups
         # Structure: { line_num: [(TokenRef, word_key)] }
         # Allows fast queries like "what tokens are on line 42?"
         self.line_index = defaultdict(list)
-        
+
         # Dictionary stores TokenRef objects
         # Structure: { word_key: [TokenRef objects] }
         self.dictionary = defaultdict(list)
-        
+
         self.our_key = None  # The specific word currently being edited
         self.original = None # Original caret position before editing
         self.start_l = None  # Start line of selection
@@ -386,7 +386,7 @@ class Command:
         Central event subscription management method
         Central method to manage all dynamic event subscriptions.
         Coordinates on_scroll, on_caret, on_click, on_key, and on_open_reopen based on current plugin state.
-        
+
         This ensures:
         - on_scroll is active when editors have active sync sessions OR have selections
         - on_caret is active when editors have active sync sessions
@@ -394,16 +394,16 @@ class Command:
         - on_key is active when editors have active sync sessions
         - on_open_reopen is active when editors have active sync sessions
         - Events are properly combined and don't conflict
-        
-        this necesary for now, once PROC_GET_EVENTS https://github.com/Alexey-T/CudaText/issues/6138 is implemented this can be simplified 
+
+        this necesary for now, once PROC_GET_EVENTS https://github.com/Alexey-T/CudaText/issues/6138 is implemented this can be simplified
         """
         events_needed = []
-        
+
         # 1. Scroll Events (Active Session OR Selection with Gutter Icon)
         # Add on_scroll if any editor has an active sync session OR has a selection
         if self.active_scroll_handles or self.selection_scroll_handles:
             events_needed.append('on_scroll')
-        
+
         # 2. Active Session Events (Editing/Interaction)
         # Add on_caret, on_click, on_key, on_open_reopen if any editor has an active sync session
         if self.active_caret_handles:
@@ -411,7 +411,7 @@ class Command:
             events_needed.append('on_click')        # For clicking words
             events_needed.append('on_key')          # For Esc/Arrow keys
             events_needed.append('on_open_reopen')  # For file reload safety
-            
+
         # Update subscriptions
         set_events_safely(events_needed)
 
@@ -461,7 +461,7 @@ class Command:
         if handle in self.inited_icon_eds:
             # print('Sync Editing: Forget handle')
             self.inited_icon_eds.remove(handle)
-        
+
         self.reset(ed_self)
 
     def on_open_reopen(self, ed_self):
@@ -472,7 +472,7 @@ class Command:
         """
         if self.has_session(ed_self):
             self.reset(ed_self)
-            
+
     def show_gutter_icon(self, ed_self, line_index, active=False):
         """Shows the gutter icon at the specified line."""
         # Remove any existing gutter icon first
@@ -504,16 +504,16 @@ class Command:
         Manages on_scroll subscription for selection tracking (separate from sync edit sessions).
         """
         self.load_gutter_icons(ed_self)
-        
+
         handle = self.get_editor_handle(ed_self)
-        
+
         # Get the best line to show icon (viewport-aware)
         icon_line = self.get_visible_selection_line(ed_self)
-        
+
         if icon_line is not None:
             # Show icon at the calculated line
             self.show_gutter_icon(ed_self, icon_line)
-            
+
             # Subscribe to on_scroll for this editor if NOT already in a sync edit session
             # This allows icon to follow viewport during scrolling
             if not self.has_session(ed_self):
@@ -572,19 +572,19 @@ class Command:
         carets = ed_self.get_carets()
         if len(carets) != 1:
             return None
-        
+
         x0, y0, x1, y1 = carets[0]
         # Check if we have a selection
         if y1 < 0 or (y0 == y1 and x0 == x1):
             return None
-        
+
         # Get visible viewport range
         line_top = ed_self.get_prop(PROP_LINE_TOP)
         line_bottom = ed_self.get_prop(PROP_LINE_BOTTOM)
-        
+
         # Always return middle line of viewport when there's a selection
         middle_line = (line_top + line_bottom) // 2
-        
+
         return middle_line
 
     def start_sync_edit(self, ed_self):
@@ -600,18 +600,18 @@ class Command:
         All configuration is read fresh from file/theme on every start so the user does not need to restart CudaText.
         """
         session = self.get_session(ed_self)
-        
+
         # Clean up selection scroll tracking since we're starting a sync session
         handle = self.get_editor_handle(ed_self)
         if handle in self.selection_scroll_handles:
             self.selection_scroll_handles.remove(handle)
             self._update_event_subscriptions()
-            
-            
+
+
         # now that we created a session we should always call update_gutter_icon_on_selection before start_sync_edit to set gutter_icon_line (set by show_gutter_icon) which will be used in start_sync_edit to set the active gutter icon
         # Update gutter icon before starting to ensure session.gutter_icon_line is set. This allows us to flip it to "Active" mode shortly after.
         self.update_gutter_icon_on_selection(ed_self)
-        
+
         # --- 1. Initial basic checks ---
 
         carets = ed_self.get_carets()
@@ -624,12 +624,12 @@ class Command:
         def restore_caret(caret, keep_selection=False):
             if keep_selection:
                 # FAILURE CASE: Restore exact previous state (caret + selection)
-                ed_self.set_caret(caret[0], caret[1], 
+                ed_self.set_caret(caret[0], caret[1],
                     caret[2], caret[3], id=CARET_SET_ONE)
             else:
                 # SUCCESS CASE: Keep caret position, but clear selection range (-1)
                 ed_self.set_caret(caret[0], caret[1], -1, -1, id=CARET_SET_ONE)
-                
+
         original = ed_self.get_text_sel()
 
         # Check if we have selection of text
@@ -640,14 +640,14 @@ class Command:
 
         # --- 2. Check if lexer is still parsing (for non-naive lexers) ---
         cur_lexer = ed_self.get_prop(PROP_LEXER_FILE)
-        
+
         # Force naive way if lexer is none or lexer is one of the text file types
         is_naive_lexer = not cur_lexer or cur_lexer in NAIVE_LEXERS
-            
+
         # Instantiate config to get fresh values from disk on every session
         ini_config = PluginConfig()
         use_simple_naive_mode = is_naive_lexer or ini_config.get_lexer_bool(cur_lexer, 'use_simple_naive_mode', USE_SIMPLE_NAIVE_MODE_DEFAULT)
-            
+
         # Check if lexer is busy (only for non-naive lexers)
         # when we call start_sync_edit() on a big file that uses a lexer we may get wrong results if the user just opened it recently, because Cudatext takes some time to parse and set tokens (Id, comments, strings..etc), this means that start_sync_edit will get wrong results because it will have few token or none, because cudatext did not return all tokens with get_token(TOKEN_LIST_SUB ...), so to fix this problem we use PROP_LEXER_BUSY it is a lot better, easier, simpler and safer than subscribing to on_lexer_parsed event which have a lot of challenges to implement it correctly.
         if not use_simple_naive_mode:
@@ -664,7 +664,7 @@ class Command:
 
         # --- 3. Start ---
         # now we are sure that CudaText lexer parsing finished so we can start the work safely
-        
+
         # === PROFILING START: START_SYNC_EDIT ===
         if ENABLE_PROFILING_inside_start_sync_edit:
             pr_start, s_start = start_profiling()
@@ -675,13 +675,13 @@ class Command:
         t_prev = t0
 
         # --- 3.1. Selection Handling ---
-        
+
         # Save coordinates and "Lock" the selection
         session.start_l, session.end_l = ed_self.get_sel_lines()
         session.selected = True
         start_l = session.start_l
         end_l = session.end_l
-        
+
         # Break text selection and clear visual selection to show markers instead
         ed_self.set_sel_rect(0,0,0,0)
 
@@ -691,7 +691,7 @@ class Command:
 
         # Mark the range properties for CudaText
         ed_self.set_prop(PROP_MARKED_RANGE, (start_l, end_l))
-        
+
         # --- 3.2. Load Configuration ---
 
         session.use_simple_naive_mode = use_simple_naive_mode
@@ -744,8 +744,8 @@ class Command:
         # Run lexer scan from start. Force a Lexer scan to ensure tokens are up to date
         # EDACTION_LEXER_SCAN seems not needed anymore see:https://github.com/Alexey-T/CudaText/issues/6124
         # ed_self.action(EDACTION_LEXER_SCAN, session.start_l) #API 1.0.289
-        
-        if ENABLE_BENCH_TIMER: 
+
+        if ENABLE_BENCH_TIMER:
             t_now = time.perf_counter()
             print(f"START_SYNC_EDIT 5% config: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
             t_prev = t_now
@@ -755,7 +755,7 @@ class Command:
         x1, y1, x2, y2 = caret
         if (y1, x1) > (y2, x2):
             x1, y1, x2, y2 = x2, y2, x1, y1 # Sort coords of caret
-            
+
         # FIX #15 regression: when selection ends at the start of a new empty line, and we remove token outside of the selection (done bellow in "Drop tokens outside of selection") we lose the last line. the problem come from get_sel_lines() it does not return the last empty line, but get_carets() include the last empty line.
         # here we handle selection ending at the start of a new line.
         # If x2 is 0 and we have multiple lines, it means the selection visually ends at the previous line's end. We adjust x2, y2 to point to the "end" of the previous line so our filter later don't drop tokens on that line.
@@ -767,14 +767,14 @@ class Command:
         key_normalizer = (lambda s: s) if session.case_sensitive else (lambda s: s.lower())
 
         # --- 4. Step A: Build Dictionary AND Line Index ---
-        
+
         # Use defaultdict (fastest for list appending workload)
         session.dictionary = defaultdict(list)
         session.line_index = defaultdict(list)
         if session.use_simple_naive_mode:
             # === NAIVE MODE (Regex Only) ===
             # Naive Mode: Scan text purely by Regex, ignoring syntax context. This is generally faster as it bypasses ed.get_token
-            
+
             for y in range(start_l, end_l+1):
                 cur_line = ed_self.get_text_line(y)
                 for match in session.regex_identifier.finditer(cur_line):
@@ -783,34 +783,34 @@ class Command:
                     # 1. Drop tokens outside of selection
                     if y == start_l and mstart < x1: continue
                     if y == end_l and mend > x2: continue
-                    
+
                     key = key_normalizer(matchg)
                     token_ref = TokenRef(mstart, y, mend, y, matchg, 'id')
-                    
+
                     # 2. Build dict and line_index
                     session.dictionary[key].append(token_ref)
                     session.line_index[y].append((token_ref, key))
         else:
             # === LEXER MODE (Syntax Aware) ===
             # Standard Lexer Mode: Filter tokens by Style (Variable, Function, etc.)
-            
+
             # 1. Get Tokens in the selected range
             tokenlist = ed_self.get_token(TOKEN_LIST_SUB, start_l, end_l) or []
-            
+
             if not tokenlist:
                 self.reset(ed_self)
                 msg_status(_('Sync Editing: No syntax tokens found'))
                 if SHOW_PROGRESS: self.set_progress(-1)
                 # keep_selection=True because we are aborting
                 restore_caret(caret, keep_selection=True)
-                
+
                 # === PROFILING STOP: START_SYNC_EDIT (Exit Early) ===
                 if ENABLE_PROFILING_inside_start_sync_edit:
                     stop_profiling(pr_start, s_start, title='PROFILE: start_sync_edit (Entry Mode - Early Exit)')
                 # ====================================================
                 return
 
-            if ENABLE_BENCH_TIMER: 
+            if ENABLE_BENCH_TIMER:
                 t_now = time.perf_counter()
                 print(f"START_SYNC_EDIT 30% get_token: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
                 t_prev = t_now
@@ -824,59 +824,59 @@ class Command:
                 style: bool(include_re.match(style) and not exclude_re.match(style))
                 for style in unique_styles
             }
-            
+
             # Process tokens with immediate TokenRef creation
             for token in tokenlist:
                 # A. Drop tokens outside of selection
                 if token['y1'] == start_l and token['x1'] < x1: continue
                 if token['y2'] == end_l and token['x2'] > x2: continue
-                
+
                 # B. Check if a token's style matches the allowed patterns (IDs) and rejects Keywords (O(1) dict lookup)
                 if not style_valid.get(token['style'], False):
                     continue
-                
+
                 # C. Add to dictionary AND line index in one pass
                 key = key_normalizer(token['str'])
                 token_ref = TokenRef(token['x1'], token['y1'], token['x2'], token['y2'], token['str'], token['style'])
-                
+
                 # Build dict and line_index.
                 session.dictionary[key].append(token_ref)
                 session.line_index[token['y1']].append((token_ref, key))
-        
-        if ENABLE_BENCH_TIMER: 
+
+        if ENABLE_BENCH_TIMER:
             t_now = time.perf_counter()
             print(f"START_SYNC_EDIT 60% Build dict+line: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
             t_prev = t_now
         if SHOW_PROGRESS: self.set_progress(70)
-        
+
         # --- 4 Step B: Remove Singletons (Clean garbage) ---
-        
+
         # Filter dictionary and line_index simultaneously to avoid rebuilding line_index
         keys_to_remove = [k for k, v in session.dictionary.items() if len(v) < 2]
         for key in keys_to_remove:
             # Get tokens before deleting
             singleton_tokens = session.dictionary[key]
             del session.dictionary[key]
-            
+
             # Remove from line_index (mark for removal)
             for token_ref in singleton_tokens:
                 line_num = token_ref.start_y
                 if line_num in session.line_index:
                     # Filter out this specific token_ref
                     session.line_index[line_num] = [
-                        (ref, k) for ref, k in session.line_index[line_num] 
+                        (ref, k) for ref, k in session.line_index[line_num]
                         if ref is not token_ref
                     ]
                     # Clean up empty line entries
                     if not session.line_index[line_num]:
                         del session.line_index[line_num]
-        
-        if ENABLE_BENCH_TIMER: 
+
+        if ENABLE_BENCH_TIMER:
             t_now = time.perf_counter()
             print(f"START_SYNC_EDIT 70% remove dup: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
             t_prev = t_now
         if SHOW_PROGRESS: self.set_progress(85)
-        
+
         # Validation: Ensure we actually found words to edit. Exit if no id's (eg: comments and etc)
         if not session.dictionary:
             self.reset(ed_self)
@@ -884,7 +884,7 @@ class Command:
             if SHOW_PROGRESS: self.set_progress(-1)
             # keep_selection=True because we are aborting
             restore_caret(caret, keep_selection=True)
-            
+
             # === PROFILING STOP: START_SYNC_EDIT (Exit Early) ===
             if ENABLE_PROFILING_inside_start_sync_edit:
                 stop_profiling(pr_start, s_start, title='PROFILE: start_sync_edit (Entry Mode - Early Exit)')
@@ -892,7 +892,7 @@ class Command:
             return
 
         # --- 5. Generate Color Map (once for entire session) ---
-        
+
         # Pre-generate all colors to maintain consistency of colors when switching between View and Edit mode, so words will have the same color always inside the same session, and this reduce overhead also
         if session.use_colors:
             rdm = random.randint(0, 0xFFFFFF)
@@ -905,36 +905,36 @@ class Command:
         else:
             session.word_colors = {}
 
-        if ENABLE_BENCH_TIMER: 
+        if ENABLE_BENCH_TIMER:
             t_now = time.perf_counter()
             print(f"START_SYNC_EDIT 85% gen colors: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
             t_prev = t_now
         if SHOW_PROGRESS: self.set_progress(95)
-        
+
         # --- 6. Apply Visual Markers (ONLY FOR VISIBLE VIEWPORT PORTION) ---
-        
+
         # Visualize all editable identifiers in the selection. Mark all words that we can modify with pretty light color
         self.mark_all_words(ed_self)
-        
-        if ENABLE_BENCH_TIMER: 
+
+        if ENABLE_BENCH_TIMER:
             t_now = time.perf_counter()
             print(f"START_SYNC_EDIT 95% mark_all_words: {t_now - t0:.4f}s ({t_now - t_prev:.4f}s)")
-            t_prev = t_now 
+            t_prev = t_now
         if SHOW_PROGRESS: self.set_progress(-1)
 
         # Calculate summary statistics for the status bar message
-        unique_duplicates_count = len(session.dictionary) 
+        unique_duplicates_count = len(session.dictionary)
         total_duplicates_count = sum(len(v) for v in session.dictionary.values())
         total_elapsed_time = time.perf_counter() - t0
         msg_summary = _(f'Sync Editing: Click ID to edit or Icon/Esc to exit. IDs={unique_duplicates_count}, Dups={total_duplicates_count}  ({total_elapsed_time:.3f}s)')
         msg_status(msg_summary)
-        
+
         # Subscribe to on_scroll, on_caret, on_click, on_key, on_open_reopen events for this editor
         handle = self.get_editor_handle(ed_self)
         self.active_scroll_handles.add(handle)
         self.active_caret_handles.add(handle)
         self._update_event_subscriptions()
-        
+
         # restore caret but w/o selection
         # keep_selection=False (default) because markers are now active
         # restore_caret(caret, keep_selection=False)
@@ -970,21 +970,21 @@ class Command:
         session = self.get_session(ed_self)
         if not session.use_colors:
             return
-        
+
         # Get visible line range
         line_top, line_bottom = self.get_visible_line_range(ed_self)
-        
+
         # Collect all markers to add, sorted by (y, x)
         # Collect markers only for visible VIEWPORT lines
         markers_to_add = []
-        
+
         for key in session.dictionary:
             # Get pre-generated color for this word or generate a new color for new words (edited words become new words after edits)
             color = session.word_colors.get(key)
             if color is None:
                 color = generate_color(key)
                 session.word_colors[key] = color
-                            
+
             for token_ref in session.dictionary[key]:
                 # OPTIMIZATION: Only add markers for the visible lines of the VIEWPORT
                 if line_top <= token_ref.start_y <= line_bottom:
@@ -994,11 +994,11 @@ class Command:
                         token_ref.end_x - token_ref.start_x,  # len
                         color
                     ))
-        
+
         # Sort markers by (y, x) because this is what attr(MARKERS_ADD does internally, so we help it here to speed up things
         # this is very important for big files, a 9mb javascript file with 400k duplicates takes 14min, with this it takes only 22s see: https://github.com/CudaText-addons/cuda_sync_editing/issues/23
         markers_to_add.sort(key=lambda m: (m[0], m[1]))
-        
+
         # Add all markers in sorted order
         for y, x, length, color in markers_to_add:
             ed_self.attr(MARKERS_ADD,
@@ -1019,20 +1019,20 @@ class Command:
         """
         if not word_key:
             return False
-            
+
         tokens_list = session.dictionary.get(word_key)
         if not tokens_list:
             return False
-        
+
         # Check if all tokens are zero-length (word was deleted)
-        all_empty = all(token_ref.text == '' or token_ref.start_x == token_ref.end_x 
+        all_empty = all(token_ref.text == '' or token_ref.start_x == token_ref.end_x
                         for token_ref in tokens_list)
-        
+
         if all_empty:
             # Word was completely deleted - remove from dictionary
             affected_lines = set(token_ref.start_y for token_ref in tokens_list)
             del session.dictionary[word_key]
-            
+
             # Remove from line_index
             for line_num in affected_lines:
                 if line_num in session.line_index:
@@ -1043,9 +1043,9 @@ class Command:
                     # Clean up empty line entries
                     if not session.line_index[line_num]:
                         del session.line_index[line_num]
-            
+
             return True
-        
+
         return False
 
     def finish_editing(self, ed_self, colorize=True):
@@ -1073,38 +1073,38 @@ class Command:
         SOLVE THE CARET POSITIONING PROBLEM:
         ================================================
         when the user switch from Edit Mode to Selection/View mode we need to reset multicarets to one caret, the caret must stay where the user expect it to be, stay where he moved it. whats seems to be simple becomes complex!
-        
+
         Problem: When editing a word that appears N times, we have N carets. When user moves with arrow keys (up/down/left/right), ALL carets move together, and the carets list gets re-sorted by CudaText based on (y, x) position. When we reset multicaret to one caret we need to know which caret corresponds to the word the user originally clicked.
-        
+
         Failed solutions (do not always work):
         ======================================
-        
+
         method1:
         ========
-        
+
         # Reset carets to the first caret (keep first caret position)
         carets = ed_self.get_carets()
         ed_self.set_caret(carets[0][0], carets[0][1], id=CARET_SET_ONE)
-        
+
         Problem: caret jump to the top first ID which is not nice, when file is big the document scroll to the top
 
         method2:
         ========
-        
+
         # use the position of the original word where the user clicked the first time
         ed_self.set_caret(session.original[0], session.original[1], id=CARET_SET_ONE)
-        
+
         Problem: when user moves caret with arrow keys (up/down), the caret stay on the edited word not the upper/bellow line, the user will think cudatext is buged because his caret did not move
-            
+
         method3:
         ========
-        
+
         # Reset carets to single caret at the ORIGINAL position (where user first clicked)
         # Find the caret that corresponds to the line where the user started editing,
         # otherwise it defaults to carets[0] and jumps to the top of the file.
         carets = ed_self.get_carets()
         if carets:
-            final_x, final_y = carets[0][0], carets[0][1] # Default to first caret            
+            final_x, final_y = carets[0][0], carets[0][1] # Default to first caret
             if session.original:
                 orig_y = session.original[1]
                 # Find the caret that is on the same line as the original click
@@ -1114,52 +1114,52 @@ class Command:
                         final_x, final_y = cx, cy
                         break
             ed_self.set_caret(final_x, final_y, id=CARET_SET_ONE)
-            
+
         Problem: this was working in all the cases until i found this bug:
         here we are inside Edit mode and caret '|' is at the end of the second ccc
           aaa  ccc
           ccc|  aaa
           aaa  ccc
-        
+
         when we move the caret to the right, we exit Edit mode, so the above code reset the carets, but we get wrong caret positioning, the caret jumps to the start of the second line!
           aaa  ccc
         |  ccc  aaa
           aaa  ccc
-        
+
         this is just one example, but in this text example i found a lot of bugs with all positioning up/down/left/right, specially when one of the carets find the end of line. so we need another solution!
 
-        
+
         method4: Best
         =============
-        
+
         Solution: Track the OCCURRENCE INDEX (which duplicate was clicked: 1st, 2nd, 3rd, etc).
-        
+
         Example scenario:
         -----------------
           aaa  ccc    <- occurrence index 0 (first "ccc")
           ccc  aaa    <- occurrence index 1 (second "ccc") <- USER CLICKS HERE
           aaa  ccc    <- occurrence index 2 (third "ccc")
-        
+
         When user clicks the middle "ccc":
         1. We save original_occurrence_index = 1
         2. We create 3 carets (one per "ccc"), sorted by position
         3. Caret at index 1 in the sorted list corresponds to the middle "ccc"
-        
+
         When user presses UP arrow:
         - All 3 carets move up one line
         - The carets list is re-sorted by CudaText: [line0_ccc, line1_ccc, line2_ccc]
         - BUT: The caret that was at index 1 is STILL at index 1 in the sorted list
         - Why? Because sorting by (y,x) preserves the relative order of word occurrences
-        
+
         When user presses RIGHT arrow (moving into the space after "ccc"):
         - All 3 carets move right (now in spaces, not in words)
         - Carets are still sorted by (y,x)
         - The caret at index 1 still corresponds to the middle occurrence
         - That caret now has the updated x position (in the space)
-        
+
         Result: By using carets[original_occurrence_index], we get the caret that moved
         with the word the user originally clicked, with its current position after movements.
-        
+
         How it is implemented:
         ----------------------
         In on_click, we find which occurrence index this clicked word is (e.g., 0 for first, 1 for second, 2 for third occurrence) and save it to original_occurrence_index. Then the rest of the code auto-refreshes this word's positioning while it is edited (via redraw()) and saves it to session.dictionary.
@@ -1172,7 +1172,7 @@ class Command:
             # Carets are sorted by (y, x), same order as our dictionary tokens
             # The Nth occurrence corresponds to the Nth caret
             idx = session.original_occurrence_index
-            
+
             # Safety check: Ensure the index is valid
             # Why might idx >= len(carets)?
             # ---------------------------------------------------------------
@@ -1180,14 +1180,14 @@ class Command:
             # - We create N carets for N occurrences when starting edit mode
             # - Arrow key movements preserve all carets
             # - on_caret is called BEFORE finish_editing, so carets still exist
-            # 
+            #
             # However, this can happen in edge cases:
             # 1. User manually deleted some carets
             # 2. Some other plugin interfered with carets
             # 3. Unexpected CudaText behavior or bug
             # 4. The word was edited to become invalid (e.g., deleted completely) and some carets disappeared
             # 5. Carets were removed by CudaText when we use up/down key, but this should never happen now because we block this keys in on_key
-            # 
+            #
             # In such cases, we fall back to carets[0] as a safe default rather than crashing.
             # This ensures the plugin remains stable even in unexpected scenarios.
             if idx < len(carets):
@@ -1199,7 +1199,7 @@ class Command:
                 # Better to land somewhere reasonable than to crash with IndexError
                 final_x, final_y = carets[0][0], carets[0][1]
 
-            
+
             # Set single caret at the determined position
             # This removes all other carets and places one caret at (final_x, final_y)
             # CARET_OPTION_NO_SCROLL gave bad result, when carets are removed it seems that cudatext remembers the first top caret and when i set the caret here cudatext scroll to the first caret even when the caret is on my wanted position which i set here, but because of CARET_OPTION_NO_SCROLL cudatext will not scroll to my wanted position, what a strange bahvior
@@ -1212,7 +1212,7 @@ class Command:
         session.our_key = None
         session.original = None
         session.original_occurrence_index = None
-        
+
         # Clear caret cache (will be rebuilt on next edit session)
         session.cached_carets_count = None
         session.cached_carets_lines = None
@@ -1232,10 +1232,10 @@ class Command:
         carets = ed_self.get_carets()
         if not carets:
             return False
-            
+
         idx = session.original_occurrence_index
         tokens_list = session.dictionary.get(session.our_key)
-        
+
         # 1. Validation
         if idx is None or not tokens_list or idx >= len(carets) or idx >= len(tokens_list):
             return False
@@ -1243,24 +1243,24 @@ class Command:
         # Get the specific Caret and TokenRef
         x0, y0 = carets[idx][0], carets[idx][1]
         token_ref = tokens_list[idx]
-        
-        # 2. Strict Line Check 
+
+        # 2. Strict Line Check
         # (If caret wrapped to next line, y0 changed, but token_ref is old -> False)
         # this should never happen now thanks to _validate_carets_integrity
         if y0 != token_ref.start_y:
             return False
-            
+
         # 3. Find the ACTUAL start of the word under the caret
         # We cannot rely on token_ref.start_x because it is stale.
         # We must scan backwards from the caret to find where this word currently begins.
         line_text = ed_self.get_text_line(y0)
         actual_start_x = self._find_word_start(ed_self, session, line_text, x0)
-        
+
         # 4. Check if this is a valid word match
         match = session.regex_identifier.match(line_text[actual_start_x:])
         if not match:
             # no match, the user deleted the word or caret is on an invalid word (space..etc)
-            
+
             # Allow empty identifiers: keep editing active if caret is still anchored at the expected token start.
             # if the caret is at the start of the token and the caret is exactly between the start and end of the old word then the user probably deleted the word, because if the regex did not match then between start_x and end_x there is no valid word (in the past there was a word otherwise the old word would not have been saved to the dictionary in redraw()), so if there was a word between the start and end, and now there is no word between them, then this is probably a complete word delete
             if token_ref.start_x <= x0 <= token_ref.end_x and x0 == token_ref.start_x:
@@ -1268,7 +1268,7 @@ class Command:
                 return True
             # caret is on an invalid word (space...etc), probably the user only moved the caret outside the identifier/word or he wrote an invalid word/letter like space
             return False
-        
+
         # WORD FOUND - check if it matches our token with drift
         current_word = match.group(0)
         current_word_len = len(current_word)
@@ -1278,24 +1278,24 @@ class Command:
 
         # 5. DRIFT CORRECTION (The fix for "cccd cccd cccddd")
         # We need to ensure the word we found is actually the one we are tracking.
-        # But its position has shifted. 
+        # But its position has shifted.
         # Drift = (Index of this token on this line) * (Change in length)
-        
+
         # Calculate Delta (How much did the word grow/shrink?)
         # We compare current word on screen vs the original key we started editing
         old_length = len(token_ref.text)
         delta = current_word_len - old_length
-        
+
         # Count how many instances of 'our_key' are strictly BEFORE this one on the same line.
         # This tells us how many times 'delta' was applied before reaching us.
         tokens_on_line_before = 0
         for t in tokens_list:
             if t.start_y == y0 and t.start_x < token_ref.start_x:
                 tokens_on_line_before += 1
-                
+
         calculated_drift = tokens_on_line_before * delta
         expected_start_x = token_ref.start_x + calculated_drift
-        
+
         # 6. Final Identity Verification
         # Does the word we found match the expected position of our tracked token?
         if actual_start_x == expected_start_x:
@@ -1313,18 +1313,18 @@ class Command:
             ed_self = ed
         session = self.get_session(ed_self)
         handle = self.get_editor_handle(ed_self)
-        
+
         # ALWAYS clean up on_scroll, on_caret, on_click, on_key and on_open_reopen tracking (session is ending)
         self.active_scroll_handles.discard(handle)
         self.active_caret_handles.discard(handle)
-        
+
         # Also clean up selection scroll tracking
         self.selection_scroll_handles.discard(handle)
-        
+
         # Update event subscriptions
         # here we unsubscribe from on_scroll/on_caret/on_click/on_key/on_open_reopen if no other editor needs them (if no active sessions)
         self._update_event_subscriptions()
-    
+
         # Restore original position if needed
         if session.original:
             ed_self.set_caret(session.original[0], session.original[1], id=CARET_SET_ONE)
@@ -1398,14 +1398,14 @@ class Command:
         # =====================================================
 
         # Did we click on a valid ID?
-        
+
         if not clicked_key:
             # click was NOT on a valid ID
-            
+
             if session.editing:
                 # User clicked outside while he was in editing mode => finish editing mode and show colors (return to selection/view mode)
                 self.finish_editing(ed_self)
-            else: 
+            else:
                 # User clicked outside while he was in View/Selection mode
                 msg_status(_("Sync Editing: Not an ID! Click on ID to edit it. Writing outside ID's is not supported"))
             return
@@ -1417,16 +1417,16 @@ class Command:
         # ID to ID switch preparation: clean up previous word if it was deleted, then clear markers + reset carets, NO colorization with mark_all_words()
         if session.editing:
             # we clicked a valid ID, it may be a new one or the same edited one
-            
+
             # Clean up the previous word if it was completely deleted
             old_key = session.our_key
             self._cleanup_empty_word(ed_self, session, old_key)
-            
+
             # Clear markers and reset carets
             ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
             # Reset to single caret at the clicked position (keeps caret where user clicked)
             ed_self.set_caret(clicked_x, clicked_y, id=CARET_SET_ONE)
-            
+
             # === PROFILING ===
             if is_switch:
                 if ENABLE_BENCH_TIMER:
@@ -1446,7 +1446,7 @@ class Command:
         # we collect ALL instances for caret placement, but we colorize only the visible lines
         all_carets = []
         markers_to_add = []
-        
+
         for token_ref in session.dictionary[clicked_key]:
             # Add caret to ALL instances (editing must work on all words)
             all_carets.append((
@@ -1454,7 +1454,7 @@ class Command:
                 token_ref.start_x,  # x
                 offset  # store offset for caret placement
             ))
-            
+
             # But only add markers for VISIBLE instances (rendering optimization)
             if line_top <= token_ref.start_y <= line_bottom:
                 markers_to_add.append((
@@ -1462,11 +1462,11 @@ class Command:
                     token_ref.start_x,  # x
                     token_ref.end_x - token_ref.start_x,  # len
                 ))
-        
+
         # Sort both lists by (y, x), sorting is very important, read in redraw() why
         all_carets.sort(key=lambda c: (c[0], c[1]))
         markers_to_add.sort(key=lambda m: (m[0], m[1]))
-            
+
         # Add active borders ONLY to visible VIEWPORT instances of the clicked word
         for y, x, length in markers_to_add:
             ed_self.attr(MARKERS_ADD, tag=MARKER_CODE,
@@ -1480,7 +1480,7 @@ class Command:
                 border_down=1,
                 border_up=1
             )
-                 
+
         # calling CARET_DELETE_ALL before CARET_OPTION_NO_SORT is necesary to get unique carets, otherwise we will need to call CARET_SORT after calling CARET_OPTION_NO_SORT
         ed_self.set_caret(0, 0, id=CARET_DELETE_ALL)
 
@@ -1490,7 +1490,7 @@ class Command:
         # when using CARET_OPTION_NO_SORT we need to call CARET_DELETE_ALL and use sorted carets or call CARET_SORT that does this automatically, this is very important to get correct carets in get_carets
         for y, x, off in all_carets:
             ed_self.set_caret(x + off, y, id=CARET_ADD, options=CARET_OPTION_NO_EVENT + CARETFLAG_NO_SORT)
-        
+
         # Sort carets once after all additions (much faster than sorting on each add)
         # this is not needed because we already called CARET_DELETE_ALL and we used sorted carets when we called CARET_ADD, but i keep it because it is fast and adds no overhead and it is more secure (a defensive solution), because maybe the CARET_SORT get new fixes in the future that are not handeled by the above fixes (sorting and deleting carets). this seems paranoic but i should be, because the plugin is based on carets, and uses the carets sorting order everywhere in the functions, so if something is wrong with the carets sorting, the end user will get silent bugs, so it is better to be paranoid here than earning some millisecond.
         # CARET_OPTION_NO_EVENT is very important here otherwise we get on_caret event before sorting the carets which breaks the plugin functions that runs on on_caret event!
@@ -1499,7 +1499,7 @@ class Command:
 
         # Force repaint (seems NOT NEEDED - CudaText does this automatically)
         ed_self.action(EDACTION_UPDATE)
-        
+
         # === PROFILING STOP: BENCHMARKING ID-to-ID SWITCH ===
         if is_switch:
             if ENABLE_PROFILING_inside_on_click:
@@ -1520,10 +1520,10 @@ class Command:
         # Find which occurrence index this clicked word is (0-based).
         # Example: if "ccc" appears 3 times and user clicked the 2nd one, this will be index 1.
         # This index is CRITICAL because it maps directly to the caret position in the sorted carets list.
-        # 
+        #
         # Why this works:
         # - session.dictionary[clicked_key] contains TokenRef objects sorted by (y, x) position
-        # - When we create multiple carets (in on_click), we sort them by (y, x) 
+        # - When we create multiple carets (in on_click), we sort them by (y, x)
         # - Therefore: dictionary index N corresponds to caret index N
         # - If user clicks occurrence #1 (middle "ccc" in example), we save index=1
         # - Later when user moves with arrows, ALL carets move together but maintain their relative order
@@ -1563,10 +1563,10 @@ class Command:
         """
         Handles gutter icon visibility based on selection state.
         Only active when NOT in sync Edit Mode (lightweight).
-        
+
         - Called when user make a selection or cancel the selection (when using keys=sel,selreset)
         - Called when caret stops moving (when not using keys=sel,selreset).
-        
+
         - before api 1.0.470 this event is called for every slow caret
         - after api 1.0.470 and using keys=sel,selreset, this event is called only when the user makes a selection or cancel the selection, so the plugin now practically consumes no resources while it is not used
         """
@@ -1579,17 +1579,17 @@ class Command:
     # on_caret_slow is better because it will consume less resources but it breaks the colors recalculations when user edit an ID, so stick with on_caret
         """
         Hooks into caret movement during active sync editing session.
-        
+
         Continuous Edit Logic:
         If the user moves the caret OUTSIDE the active word, we 'finish' the edit, return to View/Selection mode, and show colors.
-        
+
         Includes INTEGRITY CHECK to detect and exit if caret integrity is compromised (carets removed or moved to different lines).
-        
+
         NOTE: This event is ONLY subscribed during active sync sessions (dynamically).
-        
+
         Here we handle only carets events from keyboard movements left/right. up/down are blocked in on_key. carets events made by mouse clicks are handeled in on_click.
         Here we handle only Sync Edit Mode, Sync View/Selection Mode is handeled in on_click
-        
+
         NOTE: on_caret events come always before on_click events, if Cudatext change this in the future the code should continue working fine
         """
         # OPTIMIZATION: exit early if sync edit mode is not active
@@ -1602,10 +1602,10 @@ class Command:
         session = self.sessions[handle]
         if not session.editing:
             return
-       
+
         # Check if this is a Mouse Action (Left or Right Button is pressed), mouse clicks must be handeleted in view/selection mode, we check it here because on_caret events come always before on_click events, so we have to discard those false events here, we are interested about keyboard carets movements only
         pressed_keys = app_proc(PROC_GET_KEYSTATE, '')
-        is_mouse_click = ('L' in pressed_keys) or ('R' in pressed_keys)                    
+        is_mouse_click = ('L' in pressed_keys) or ('R' in pressed_keys)
         if is_mouse_click:
             return
 
@@ -1615,21 +1615,21 @@ class Command:
             # exit Edit mode
             self.finish_editing(ed_self, colorize=True)
             return
-        
+
         # === PROFILING START: ON_CARET ===
         if ENABLE_PROFILING_inside_on_caret:
             pr_on_caret, s_on_caret = start_profiling()
         # =================================
-        
+
         # Now we are in Editing mode, and caret moved with keyboard and carets are in a good state, lets check if caret is still inside the edited word
         if not self.caret_in_current_token(ed_self):
             # Caret left current token
-            self.finish_editing(ed_self)            
+            self.finish_editing(ed_self)
         else:
             # caret moved, and it is still inside the word currently being edited
             # NOTE: self.redraw(ed_self) is called here to update word markers live during typing. This recalculates borders and shifts other tokens on the line as the word grows/shrinks. This is a performance hit on simple caret moves (arrow keys) but necessary for live updates.
             self.redraw(ed_self)
-            
+
         # === PROFILING STOP: ON_CARET (Exit Editing) ===
         if ENABLE_PROFILING_inside_on_caret:
             stop_profiling(pr_on_caret, s_on_caret, sort_key='cumulative', title='PROFILE: on_caret (Exit Editing)')
@@ -1639,23 +1639,23 @@ class Command:
         """
         Validates that carets are still in a valid state for sync editing.
         Returns True if carets are valid, False if they've been corrupted.
-        
+
         Uses the Dictionary as the Source of Truth.
 
         INTEGRITY CHECK: Detects:
         1. Number of carets changed (some were removed by CudaText)
         2. Carets moved to different lines (vertical movement or line wrap)
-        
+
         Detect if carets were lost (hit EOF/Start, this can never happen now because we block up/down key) or carets jumped to another line (Left/Right keys at EOL)
         We validate that the physical carets match our internal token records.
-        
+
         Why? when the user press left or right keyboard keys, if the carets are at the end of line and the user press left/right keys the carets at the end of line will jump to the next line while carets in the middle of line will continue inside the edited words, so this breaks editing words, so when this happens we have to exit sync edit mode and return to view/selection mode, so we have to make a cache of carets, and every time there is a carets movements we check the y position of all the current carets to the cached one and if one of them changed or the total of carets is diferent then we stop sync edit mode
         """
-        
+
         session = self.get_session(ed_self)
         if not session.editing or not session.our_key:
             return True
-        
+
         # Build cache on first call only
         # After this, we never touch the dictionary again during this edit session
         if session.cached_carets_lines is None:
@@ -1663,19 +1663,19 @@ class Command:
             tokens = session.dictionary.get(session.our_key, [])
             if not tokens:
                 return False
-            
+
             # Cache both count and line positions
             session.cached_carets_count = len(tokens)
             session.cached_carets_lines = [token.start_y for token in tokens]
-        
+
         current_carets = ed_self.get_carets()
         if not current_carets:
             return False
-        
+
         # Check 1: Count Check. If number of carets changed (e.g. hit EOF), we lost sync. Catches cases where CudaText removed carets at file boundaries
         if len(current_carets) != session.cached_carets_count:
             return False
-        
+
         # Check 2: Y-Position Check: Carets must stay on the same line as their token.
         # If a caret moves to a different line (Left/Right at EOL), cy will change, ensuring this check fails so we exit edit mode.
         # - Up/Down arrow or Enter keys that moved carets to different lines (must never happen now because we block those keys in on_key)
@@ -1685,13 +1685,13 @@ class Command:
             # We assume tokens are sorted (y,x) and get_carets returns sorted (y,x).
             if cy != session.cached_carets_lines[i]:
                 return False
-                
+
         return True
 
     def on_scroll(self, ed_self):
         """
         Called when user scrolls the editor viewport.
-        
+
         Handles two separate cases:
         1. Selection mode (NOT in sync edit): Updates gutter icon position to middle of viewport
         2. Sync edit mode: Updates markers to show only visible portions (debounced)
@@ -1699,24 +1699,24 @@ class Command:
           Uses a timer to debounce scroll events - only updates markers when scrolling stops (reduces CPU usage and makes scroll smooth).
         """
         handle = self.get_editor_handle(ed_self)
-        
+
         # Case 1: Editor has selection but NO active session - update icon position immediately
         if handle in self.selection_scroll_handles:
             self.update_gutter_icon_on_selection(ed_self)
             return
-        
+
         # Case 2: Editor has active sync edit session - handle marker updates
         if not self.has_session(ed_self):
             return
-        
+
         session = self.get_session(ed_self)
         # Only update if we're in active mode
         if not (session.selected or session.editing):
             return
-      
+
         # Stop any existing scroll timer for this editor
         timer_proc(TIMER_STOP, self._on_scroll_timer_finished, interval=0, tag=str(handle))
-        
+
         # Start a new timer that will fire when scrolling stops (150ms delay)
         timer_proc(TIMER_START_ONE, self._on_scroll_timer_finished, interval=SCROLL_DEBOUNCE_DELAY, tag=str(handle))
 
@@ -1728,24 +1728,24 @@ class Command:
         """
         if not tag:
             return
-        
+
         # Get editor from handle
         editor_handle = int(tag)
         ed_self = Editor(editor_handle)
-        
+
         # Check if this editor still has an active session
         if not self.has_session(ed_self):
             return
-        
+
         session = self.get_session(ed_self)
-        
+
         # Update gutter icon position to middle of viewport (keep it always visible)
         if session.gutter_icon_active:
             line_top = ed_self.get_prop(PROP_LINE_TOP)
             line_bottom = ed_self.get_prop(PROP_LINE_BOTTOM)
             middle_line = (line_top + line_bottom) // 2
             self.show_gutter_icon(ed_self, middle_line, active=True)
-        
+
         if session.editing:
             # In editing mode: redraw with borders markers for current active word
             self._update_edit_markers(ed_self)
@@ -1758,23 +1758,23 @@ class Command:
         """
         Updates border markers for the currently edited word
         ONLY IN THE VISIBLE VIEWPORT PORTION.
-        
+
         This function is a pure "Painter". It assumes the internal dictionary positions are already correct (because the user hasn't typed, only scrolled).
         It simply looks at the existing data and draws the borders for the lines that are now visible.
-        
+
         If we use redraw() inside on_scroll, we would be forcing the plugin to re-verify the word under the caret and attempt to update data structures every time the scroll timer fires. (High overhead)
         The redraw function is designed to handle text changes (typing). so we should not use it for on_scroll event because there is absolutely no need to run Regex, calculate deltas, or modify the internal dictionary coordinates.
         """
         session = self.get_session(ed_self)
         if not session.our_key:
             return
-        
+
         # Clear existing markers
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
-        
+
         # Get visible line range
         line_top, line_bottom = self.get_visible_line_range(ed_self)
-        
+
         # Collect all markers to add, sorted by (y, x)
         # Collect markers only for visible lines
         markers_to_add = []
@@ -1786,10 +1786,10 @@ class Command:
                     token_ref.start_x,  # x
                     token_ref.end_x - token_ref.start_x  # len
                 ))
-        
+
         # Sort markers by (y, x)
         markers_to_add.sort(key=lambda m: (m[0], m[1]))
-        
+
         # Draw active borders for the currently edited word
         for y, x, length in markers_to_add:
             ed_self.attr(MARKERS_ADD, tag=MARKER_CODE,
@@ -1817,7 +1817,7 @@ class Command:
         if key == VK_ESCAPE:
             self.reset(ed_self)
             return False
-            
+
         session = self.get_session(ed_self)
         # Only check problematic keys during editing mode
         if not session.editing:
@@ -1825,37 +1825,37 @@ class Command:
 
         # sometimes when i move the carets with the keyboard up and down key some carets are removed when they found no place where to land (start of file or end of file or an empty line with no place where to put multiple carets ), this problem breaks a lot of things in the plugin, for example original_occurrence_index will point to the wrong index because the total number of carets changed so for example if there was 10 carets, after the caret movement they become 5 carets, so ed_self.get_carets() will return 5 carets, but original_occurrence_index is still pointing to the one of the old 10 carets. to fix this we have to disable up and down keys
         # enter key is also problematic and would create multi-line editing chaos, so we have to disable it too
-        
+
         # Keys that can break caret integrity
         problematic_keys = {
             VK_UP,      # may remove carets at top of file
-            VK_DOWN,    # may remove carets at bottom of file  
+            VK_DOWN,    # may remove carets at bottom of file
             VK_ENTER,   # Would create multi-line editing chaos because it breaks the line (changing Y), which invalidates our dictionary Y-coords.
         }
-        
+
         if key in problematic_keys:
             # met1: Exit editing mode and return to selection/view mode
             # self.finish_editing(ed_self)
             # return True
-            
+
             # met2: Prevent the key from being processed
-            # Allow the user to continue editing and print a status bar message 
+            # Allow the user to continue editing and print a status bar message
             msg_status(_("Up/Down/Enter keys are not allowed inside Edit Mode"))
             return False
 
     def _find_word_start(self, ed_self, session, line_text, caret_x):
         """
         Helper: Finds the start position of a word at the given caret position.
-        
+
         Returns: actual_start_x: The x position where the word starts
         """
         # Start scanning from caret position
         actual_start_x = caret_x
-        
+
         # Workaround for end of id case: If we are at the end of the line or word, step back one char to catch the word, otherwise when caret is at the end of the ID it will exit edit mode
         if actual_start_x > 0 and (actual_start_x >= len(line_text) or not session.regex_identifier.match(line_text[actual_start_x:])):
             actual_start_x -= 1
-        
+
         # Move actual_start_x back until we find the beginning of the identifier as long as the regex matches the string starting at that position
         '''Special handling for position 0 vs other positions
         the check 'if caret_x != 0' is necesary to fix a special case:
@@ -1875,7 +1875,7 @@ class Command:
                     break
                 actual_start_x -= 1
             actual_start_x += 1  # We went one step too far back
-            
+
         return actual_start_x
 
     def redraw(self, ed_self):
@@ -1886,7 +1886,7 @@ class Command:
         2. Update the dictionary entry for the currently edited word (start/end positions).
         3. Shift positions of ALL other words that exist on the same line after the caret.
         4. Re-draw borders ONLY FOR VISIBLE VIEWPORT PORTION.
-        
+
         HEAVILY OPTIMIZED
         - Delta-based position updates (only shift what changed)
         - Line-based spatial index for O(1) lookups
@@ -1918,10 +1918,10 @@ class Command:
         # Get current state at the first caret
         carets = ed_self.get_carets()
         if not carets: return
-        
+
         idx = session.original_occurrence_index
         tokens_list = session.dictionary.get(old_key)
-        
+
         # Validation
         if idx is None or not tokens_list or idx >= len(carets) or idx >= len(tokens_list):
             idx = 0 # if no idx, use the first caret, this should never happen anyway
@@ -1930,7 +1930,7 @@ class Command:
         first_x, first_y = carets[idx][0], carets[idx][1]
         token_ref = tokens_list[idx]
         first_y_line = ed_self.get_text_line(first_y)
-        
+
         # Find the ACTUAL start of the word under the caret
         # We cannot rely on token_ref.start_x because it is stale.
         # We must scan backwards from the caret to find where this word currently begins.
@@ -1938,10 +1938,10 @@ class Command:
 
         # Check if word became empty (deleted) or invalid. Workaround for empty id (eg. when it was deleted) #62
         match = session.regex_identifier.match(first_y_line[start_pos:])
-        
+
         if not match:
             # no match, the user deleted the word or caret is on an invalid word (space..etc)
-            
+
             # Allow empty identifiers: keep editing active if caret is still anchored at the expected token start.
             # if the caret is at the start of the token and the caret is exactly between the start and end of the old word then the user probably deleted the word, because if the regex did not match then between start_x and end_x there is no valid word (in the past there was a word otherwise the old word would not have been saved to the dictionary in redraw()), so if there was a word between the start and end, and now there is no word between them, then this is probably a complete word delete
             if token_ref.start_x <= first_x <= token_ref.end_x and first_x == token_ref.start_x:
@@ -1950,16 +1950,16 @@ class Command:
                 new_length = 0
             else:
                 # caret is on an invalid word (space...etc), probably the user only moved the caret outside the identifier/word or he wrote an invalid word/letter like space
-                
+
                 # Word was deleted completely - clear markers
                 session.our_key = old_key
                 ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
-                
+
                 # === PROFILING STOP: REDRAW (Exit Early 2) ===
                 if ENABLE_PROFILING_inside_redraw:
                     stop_profiling(pr_redraw, s_redraw, sort_key='cumulative', title='PROFILE: redraw (Live Typing - Exit Early 2)')
                 # ===========================================
-                
+
                 return
         else:
             # Extract the new word from the match
@@ -1978,7 +1978,7 @@ class Command:
         # The token.text reflects the TRUE current state (can be empty "")
         # This fixes the delta calculation when transitioning from empty to letter (when user delete all the word and write again)
         old_length = len(edited_tokens[0].text) if edited_tokens else 0
-        
+
         # Calculate Length Delta change
         delta = new_length - old_length
 
@@ -2003,7 +2003,7 @@ class Command:
         for token_ref in edited_tokens:
             line_num = token_ref.start_y
             old_token_x = token_ref.start_x
-            
+
             if new_length == 0:
                 # Word deleted - keep position but zero length
                 token_ref.end_x = token_ref.start_x
@@ -2011,16 +2011,16 @@ class Command:
             else:
                 # Find new word position (may have shifted due to earlier edits on same line)
                 y_line = ed_self.get_text_line(line_num)
-                
+
                 # Scan backwards to find start of the new word instance from the adjusted position
                 # here we search for the token starting from its old position
                 search_x = self._find_word_start(ed_self, session, y_line, old_token_x)
-                
+
                 # Update this token's position in-place
                 token_ref.start_x = search_x
                 token_ref.end_x = search_x + new_length
                 token_ref.text = new_key
-            
+
             # Shift other tokens on this line that come AFTER this token
             # Only process tokens on the same line (using spatial index)
             # CRITICAL: Use >= old_token_x + old_length to handle x=0 case (user delete a word at position x=0)
@@ -2047,7 +2047,7 @@ class Command:
                 session.dictionary[new_key] = edited_tokens
 
             del session.dictionary[old_key]
-            
+
             # Update line index references (key string update)
             for line_num in affected_lines:
                 if line_num in session.line_index:
@@ -2059,34 +2059,34 @@ class Command:
                          else:
                              new_line_list.append((ref, k))
                     session.line_index[line_num] = new_line_list
-            
+
             session.our_key = new_key
         else:
             session.our_key = old_key
         '''
-        
+
         # 4. met2: Update dictionary keys if word changed, and do not handle collisions (when we edit a word and create a new word that already existed before we simply disable the old one, then user will have to restart sync edit session to include the diabled word), i found this safer because we should not fix user bugs, if user do not pay attention that he created a new word that already exist then why should we fix it for him? this is not a bug fixer plugin! so here we will simply consider the old word (which is similar to the new word) as a dead word so we do not colorize/edit it, this is safer.
         # Update dictionary keys if word changed (and is not empty)
         if new_key != '' and old_key != new_key:
             # Word changed to a different non-empty word
             session.dictionary[new_key] = edited_tokens
             del session.dictionary[old_key]
-            
+
             # Update line index references
             for line_num in affected_lines:
                 if line_num in session.line_index:
                     session.line_index[line_num] = [
-                        (ref, new_key if key == old_key else key) 
+                        (ref, new_key if key == old_key else key)
                         for ref, key in session.line_index[line_num]
                     ]
-            
+
             session.our_key = new_key
         else:
             # Word is empty or unchanged - keep using old_key
             # Even if text is empty, we keep the dictionary entry under old_key, TODO: i dont like this solution, maybe the best is to create a new variable word_deleted and set it to True here, so other parts of this plugin can know correctly if our_key should be empty or it is really the old key
             session.our_key = old_key
-            
-            
+
+
         # 5. Repaint borders ONLY FOR VISIBLE VIEWPORT PORTION
         ed_self.attr(MARKERS_DELETE_BY_TAG, tag=MARKER_CODE)
 
@@ -2113,10 +2113,10 @@ class Command:
                     token_ref.start_x,  # x
                     token_ref.end_x - token_ref.start_x  # len
                 ))
-        
+
         # Sort markers by (y, x)
         markers_to_add.sort(key=lambda m: (m[0], m[1]))
-        
+
         # Draw active borders for the currently edited word (visible VIEWPORT portion only)
         for y, x, length in markers_to_add:
             ed_self.attr(MARKERS_ADD, tag=MARKER_CODE,
@@ -2164,9 +2164,9 @@ def stop_profiling(pr, s, sort_key='cumulative', max_lines=20, title='Profile Re
     Accepts pr (cProfile.Profile) and s (io.StringIO) objects.
     """
     import pstats
-    
+
     # pr and s are guaranteed to be non-None if stop_profiling is called when ENABLE_PROFILING is True.
-    
+
     try:
         pr.disable()
     except ValueError:
@@ -2184,12 +2184,12 @@ def stop_profiling(pr, s, sort_key='cumulative', max_lines=20, title='Profile Re
             'time': pstats.SortKey.TIME,
         }
         sortby = sort_map.get(sort_key.lower(), pstats.SortKey.CUMULATIVE)
-        
+
         ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
-        
+
         # Print the stats to the in-memory stream 's'
-        ps.print_stats(max_lines) 
-        
+        ps.print_stats(max_lines)
+
         # Print the captured output to the console/log
         print(f"\n--- {title} ---")
         print(s.getvalue())
