@@ -161,9 +161,9 @@ Troubleshooting
 - "No editable identifiers found":
   If you see this message, then the plugin likely thinks your selection contains only Keywords or Comments. Try setting `use_simple_naive_mode=true` for that lexer to bypass this check, or configure that specific lexer as explained above.
 
-- "CudaText lexer parsing has just completed..." Message:
-  This message appears when opening very large files. It means CudaText hadn't finished analyzing the syntax when you started the Sync Edit session, so some tokens might have been missed.
-  Solution: Simply click the Gutter Icon (or press Esc) to stop, then click the icon again to restart. The session will now capture all identifiers correctly.
+- "CudaText is still parsing the file..." Message:
+  This message appears when opening very large files. It means CudaText hadn't finished analyzing the syntax. Just wait a few seconds and try again.
+
 
 About
 -----
