@@ -79,131 +79,34 @@ SCROLL_DEBOUNCE_DELAY = 150  # milliseconds to wait after scroll stops
 
 SHOW_PROGRESS=True
 
-
-# Check API version
-# this API introduced improved events managments: PROC_EVENTS_SUB/UNSUB, and now keys=sel,selreset for on_caret_slow works as expected too
-API_NEW = app_api_version() >= '1.0.471'
-
-# New API flag for faster multi-caret operations (no sort during CARET_ADD)
-CARETFLAG_NO_SORT = CARET_OPTION_NO_SORT if API_NEW else 0
-
-# --- 1. OPTIMIZATION FOR NEW API ---
-# If newer API, we "upgrade" on_caret_slow to use filters (sel,selreset).
-# This optimizes performance by triggering only on selection changes.
-# We do this at runtime so install.inf remains compatible with old versions. because older cudatext versions do not subscribe to on_caret_slow if we set keys=sel,selreset in install.inf see https://github.com/Alexey-T/CudaText/issues/6146
-# so to keep backward compatibility, we set only events=on_caret_slow without keys=sel,selreset in install.inf, then inside the plugin if api is greater than 1.0.471 we subscribe dynamically again to on_caret_slow but now with sel,selreset filter, this will unsub from on_caret_slow so plugin will consume no resources in new cudatext versions until the user select text. and in old versions it will use the old on_caret_slow which will run with every slow caret (not bad anyway)
-# there is only one problem, now newer cudatext versions with the new api will load the plugin always when cudatext starts, because we do not set keys=sel,selreset in install.inf. but the plugin consumes no resources anyway.
-if API_NEW:
-    # This overrides the broad on_caret_slow from install.inf
-    # Note: We must subscribe to this SEPARATELY from other events because it uses a filter list.
-    app_proc(PROC_EVENTS_SUB, 'cuda_sync_editing;on_caret_slow;;sel,selreset')
-
-# --- 2. LEGACY SUPPORT SETUP ---
-# For older API, we must parse install.inf to preserve events when using PROC_SET_EVENTS
-if not API_NEW:
-    filename_install_inf = os.path.join(os.path.dirname(__file__), 'install.inf')
-
-    def parse_install_inf_events():
-        """
-        Parse all event sections from install.inf.
-        Returns a dict with event names as keys and their filter strings as values.
-        Example: {'on_caret_slow': 'sel', 'on_click~': '', 'on_key~': ''}
-        """
-        events_dict = {}
-
-        # Find all sections that start with 'item'
-        item_num = 1
-        while True:
-            section = f'item{item_num}'
-            section_type = ini_read(filename_install_inf, section, 'section', '')
-
-            if not section_type:
-                break  # No more sections
-
-            if section_type == 'events':
-                events_str = ini_read(filename_install_inf, section, 'events', '')
-                keys_str = ini_read(filename_install_inf, section, 'keys', '')
-
-                # Split events by comma and add to dict
-                for event in events_str.split(','):
-                    event = event.strip()
-                    if event:
-                        events_dict[event] = keys_str
-
-            item_num += 1
-
-        return events_dict
-
-    install_inf_events = parse_install_inf_events()
-else:
-    install_inf_events = {}
-
-
-def set_events_safely(events_to_add, lexer_list=''):
+def set_events_dynamically(events_to_add, lexer_list=''):
     """
-    Set events dynamically based on API version.
-
-    API >= 1.0.471:
-      - Uses PROC_EVENTS_SUB/UNSUB.
-      - Manages only dynamic events (on_scroll, on_caret, on_click, on_key, on_open_reopen).
-      - Static events in install.inf are preserved automatically by CudaText.
-
-    API < 1.0.471:
-      - Uses PROC_SET_EVENTS.
-      - Merges install.inf events but FORCEFULLY STRIPS keys/filters
-        (ignoring 'sel,selreset') to avoid old API bugs.
+    Set events dynamically using PROC_EVENTS_SUB/UNSUB.
+    Manages only dynamic events (on_scroll, on_caret, on_click, on_key, on_open_reopen).
+    Static events in install.inf are preserved automatically by CudaText.
 
     Args:
         events_to_add: Set or list of event names to add (without filter strings)
         lexer_list: Comma-separated lexer names (optional)
     """
 
-    if API_NEW:
-        # --- NEW API LOGIC ---
+    # 1. Define dynamic events managed by this plugin
+    DYNAMIC_EVENTS = {'on_scroll', 'on_caret', 'on_click', 'on_key', 'on_open_reopen'}
 
-        # 1. Define dynamic events managed by this plugin
-        DYNAMIC_EVENTS = {'on_scroll', 'on_caret', 'on_click', 'on_key', 'on_open_reopen'}
+    # 2. Unsubscribe from dynamic events that are NOT in the needed list
+    # We must explicitly unsub to turn them off, otherwise they stick around.
+    current_needed = set(events_to_add)
+    to_unsub = [ev for ev in DYNAMIC_EVENTS if ev not in current_needed]
 
-        # 2. Unsubscribe from dynamic events that are NOT in the needed list
-        # We must explicitly unsub to turn them off, otherwise they stick around.
-        current_needed = set(events_to_add)
-        to_unsub = [ev for ev in DYNAMIC_EVENTS if ev not in current_needed]
+    if to_unsub:
+        app_proc(PROC_EVENTS_UNSUB, f'cuda_sync_editing;{",".join(to_unsub)}')
 
-        if to_unsub:
-            app_proc(PROC_EVENTS_UNSUB, f'cuda_sync_editing;{",".join(to_unsub)}')
-
-        # 3. Subscribe to the needed dynamic events
-        # Note: These dynamic events do not use filters in this context, so we pass empty filter args.
-        if events_to_add:
-            # Format: "module;event_list;lexer_list;filter_list"
-            events_str = ','.join(events_to_add)
-            app_proc(PROC_EVENTS_SUB, f'cuda_sync_editing;{events_str};{lexer_list};;')
-
-    else:
-        # --- LEGACY API LOGIC (Old CudaText) ---
-
-        # in the old API we have to set events while preserving those from install.inf. because PROC_SET_EVENTS resets all the events including those from install.inf (only events in plugins.ini are preserved).
-        # and also we should not use on_caret_slow keys filters like sel and selreset, the old API was buged, so when we parse install.inf we must remove them when we subscribe dynamically to on_caret_slow. this will not break this plugin because on_caret_slow events are suficient to detect text selections without using sel/selreset.
-
-        # Combine install.inf events with new events
-        all_events = {}
-
-        # Add install.inf events (on_caret_slow, on_close, on_click_gutter) but FORCE empty filters (ignore keys like 'sel,selreset')
-        for ev in install_inf_events:
-            all_events[ev] = ''
-
-        # Add new dynamic events (on_key, on_click, etc.), without filters
-        for event in events_to_add:
-            if event not in all_events:
-                all_events[event] = ''
-
-        # Build event string
-        event_names = ','.join(all_events.keys())
-
-        # Filter string is explicitly empty because we stripped keys from install.inf events
-        filter_strings = ''
-
-        app_proc(PROC_SET_EVENTS, f"cuda_sync_editing;{event_names};{lexer_list};{filter_strings}")
+    # 3. Subscribe to the needed dynamic events
+    # Note: These dynamic events do not use filters in this context, so we pass empty filter args.
+    if events_to_add:
+        # Format: "module;event_list;lexer_list;filter_list"
+        events_str = ','.join(events_to_add)
+        app_proc(PROC_EVENTS_SUB, f'cuda_sync_editing;{events_str};{lexer_list};;')
 
 def bool_to_ini(value):
     return 'true' if value else 'false'
@@ -389,13 +292,8 @@ class Command:
 
         This ensures:
         - on_scroll is active when editors have active sync sessions OR have selections
-        - on_caret is active when editors have active sync sessions
-        - on_click is active when editors have active sync sessions
-        - on_key is active when editors have active sync sessions
-        - on_open_reopen is active when editors have active sync sessions
+        - on_caret/on_click/on_key/on_open_reopen is active when editors have active sync sessions
         - Events are properly combined and don't conflict
-
-        this necesary for now, once PROC_GET_EVENTS https://github.com/Alexey-T/CudaText/issues/6138 is implemented this can be simplified
         """
         events_needed = []
 
@@ -413,7 +311,7 @@ class Command:
             events_needed.append('on_open_reopen')  # For file reload safety
 
         # Update subscriptions
-        set_events_safely(events_needed)
+        set_events_dynamically(events_needed)
 
     def get_editor_handle(self, ed_self):
         """Returns a unique identifier for the editor."""
@@ -651,7 +549,7 @@ class Command:
         # Check if lexer is busy (only for non-naive lexers)
         # when we call start_sync_edit() on a big file that uses a lexer we may get wrong results if the user just opened it recently, because Cudatext takes some time to parse and set tokens (Id, comments, strings..etc), this means that start_sync_edit will get wrong results because it will have few token or none, because cudatext did not return all tokens with get_token(TOKEN_LIST_SUB ...), so to fix this problem we use PROP_LEXER_BUSY it is a lot better, easier, simpler and safer than subscribing to on_lexer_parsed event which have a lot of challenges to implement it correctly.
         if not use_simple_naive_mode:
-            lexer_busy = API_NEW and ed_self.get_prop(PROP_LEXER_BUSY)
+            lexer_busy = ed_self.get_prop(PROP_LEXER_BUSY)
             if lexer_busy:
                 self.reset(ed_self)
                 tab_title = ed_self.get_prop(PROP_TAB_TITLE)
@@ -1489,13 +1387,12 @@ class Command:
         # Uses NO_EVENT and NO_SORT options for performance with large number of carets, NO_SORT reduces setting 20k carets from 30s to few ms
         # when using CARET_OPTION_NO_SORT we need to call CARET_DELETE_ALL and use sorted carets or call CARET_SORT that does this automatically, this is very important to get correct carets in get_carets
         for y, x, off in all_carets:
-            ed_self.set_caret(x + off, y, id=CARET_ADD, options=CARET_OPTION_NO_EVENT + CARETFLAG_NO_SORT)
+            ed_self.set_caret(x + off, y, id=CARET_ADD, options=CARET_OPTION_NO_EVENT + CARET_OPTION_NO_SORT)
 
         # Sort carets once after all additions (much faster than sorting on each add)
         # this is not needed because we already called CARET_DELETE_ALL and we used sorted carets when we called CARET_ADD, but i keep it because it is fast and adds no overhead and it is more secure (a defensive solution), because maybe the CARET_SORT get new fixes in the future that are not handeled by the above fixes (sorting and deleting carets). this seems paranoic but i should be, because the plugin is based on carets, and uses the carets sorting order everywhere in the functions, so if something is wrong with the carets sorting, the end user will get silent bugs, so it is better to be paranoid here than earning some millisecond.
         # CARET_OPTION_NO_EVENT is very important here otherwise we get on_caret event before sorting the carets which breaks the plugin functions that runs on on_caret event!
-        if API_NEW:
-            ed_self.set_caret(0, 0, id=CARET_SORT, options=CARET_OPTION_NO_EVENT)
+        ed_self.set_caret(0, 0, id=CARET_SORT, options=CARET_OPTION_NO_EVENT)
 
         # Force repaint (seems NOT NEEDED - CudaText does this automatically)
         ed_self.action(EDACTION_UPDATE)
@@ -1567,9 +1464,7 @@ class Command:
         """
         Handles gutter icon visibility based on selection state.
         Only active when NOT in sync Edit Mode (lightweight).
-
-        - Called when user make a selection or cancel the selection (when using keys=sel,selreset)
-        - Called when caret stops moving (when not using keys=sel,selreset).
+        Called when user make a selection or cancel the selection (thanks to using keys=sel,selreset)
 
         - before api 1.0.470 this event is called for every slow caret
         - after api 1.0.470 and using keys=sel,selreset, this event is called only when the user makes a selection or cancel the selection, so the plugin now practically consumes no resources while it is not used
