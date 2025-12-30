@@ -1,3 +1,6 @@
+2025.12.30 (patches by @badrelmers)
+* change: removed backward compatability with old API, so can cleaup the code.
+
 2025.12.16 (patches by @badrelmers)
 + add: Optimization for faster caret placement: Implemented CARET_OPTION_NO_SORT to fix slow carets setting when switching from one ID to another in big files (speed went from 6s to instant for 20k carets).
 * change: Improved fix for late lexer tokens parsing by replacing on_lexer_parsed with the new good API PROP_LEXER_BUSY (removed dependency on on_lexer_parsed event and related timers and its dirty workarounds).
