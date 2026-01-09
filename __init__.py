@@ -1439,11 +1439,15 @@ class Command:
         total_count = len(session.dictionary[clicked_key])
         msg_status(_('Sync Editing: Editing "%s" (%d occurrences)') % (clicked_key, total_count))
 
-    def on_click_gutter(self, ed_self, _state, nline, _nband):
+    def on_click_gutter(self, ed_self, _state, nline, nband):
         """
         Handles clicks on the gutter area.
         If user clicks on the sync edit icon, toggle the sync editing mode.
         """
+        # Only click on 'bookmarks' band must be valid
+        if nband != 0:
+            return
+
         # Check if there's a decoration on this line with our tag
         decorations = ed_self.decor(DECOR_GET_ALL, nline)
 
